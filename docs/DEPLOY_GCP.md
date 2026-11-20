@@ -58,13 +58,13 @@ sudo journalctl -u google-startup-scripts -f
 ```sh
 git clone https://github.com/Bikramshit/pact.git && cd pact
 cp .env.example .env
-nano .env                 # optional: paste GEMINI_API_KEY, then Ctrl-O, Enter, Ctrl-X
+nano .env                 # no sudo. Optional: paste GEMINI_API_KEY, then Ctrl-O, Enter, Ctrl-X
 sh deploy/gcp/up.sh
 ```
 
-The first run adds you to the `docker` group and stops. Type `exit`, connect again as in step 2, then run `cd pact && sh deploy/gcp/up.sh` again.
+The first run adds you to the `docker` group and stops. The group applies only to new logins, so type `exit`, connect again as in step 2, then run `cd pact && sh deploy/gcp/up.sh` again. Rerunning it without reconnecting prints the same message.
 
-`up.sh` asks for a dashboard password (10 or more characters; the user name is `judge`), then:
+`up.sh` asks for a dashboard password (10 or more characters; the user name is `judge`). For a short demo with no password at all, run `PACT_PUBLIC=1 sh deploy/gcp/up.sh` instead. Anyone who finds the link can then approve held actions, reset the demo and spend the Gemini quota, so stop the VM as soon as the demo is over. Then `up.sh`:
 
 1. Replaces the public dev values of `TARGET_TOKEN`, `RUNNER_TOKEN` and `POSTGRES_PASSWORD` in `.env` with random ones, and makes `.env` readable by you only.
 2. Writes the Caddy configuration: HTTPS for the sslip.io name, the password, then `127.0.0.1:8080`.
