@@ -8,6 +8,7 @@ import { Feed, type FeedItem } from "@/components/Feed";
 import { GroundTruth } from "@/components/GroundTruth";
 import { FlowLegend, FlowMap, targetOf, type Outcome, type Pulse, type TargetCounts } from "@/components/illustrations/FlowMap";
 import { IdleArt } from "@/components/illustrations/Spots";
+import { UseOwnKeyButton } from "@/components/ModelKeyDialog";
 import { Card, CardHeader, Empty, PageHeader, Segmented, Spinner, StatusBadge } from "@/components/ui";
 import { api, short, usePoll } from "@/lib/api";
 import { useLive, useLiveEvent } from "@/lib/live";
@@ -319,7 +320,7 @@ export default function RunPage() {
               ))}
             </div>
             <div className="mt-4 grid gap-2 sm:grid-cols-2">
-              <button className="btn btn-primary" disabled={!!busy || !instruction.trim() || !canLive} onClick={() => doDraft(false)} title={canLive ? "" : "Needs GEMINI_API_KEY"}>
+              <button className="btn btn-primary" disabled={!!busy || !instruction.trim() || !canLive} onClick={() => doDraft(false)} title={canLive ? "" : "Needs a working Gemini key"}>
                 {busy === "draft" ? <Spinner /> : <Sparkles className="size-4" />}
                 {busy === "draft" ? "Drafting…" : "Draft with Gemini"}
               </button>
@@ -328,9 +329,12 @@ export default function RunPage() {
               </button>
             </div>
             {!canLive && (
-              <p className="mt-3 flex items-start gap-2 text-[12.5px] text-muted">
-                <Info className="mt-0.5 size-3.5 shrink-0" /> No Gemini key is set, so drafting uses the pre-written contract and the agent runs scripted.
-              </p>
+              <div className="mt-3 flex items-start gap-2 text-[12.5px] text-muted">
+                <Info className="mt-0.5 size-3.5 shrink-0" />
+                <span>
+                  No working Gemini key, so drafting uses the pre-written contract and the agent runs scripted. <UseOwnKeyButton className="text-[12.5px]" />
+                </span>
+              </div>
             )}
           </StepCard>
 
@@ -485,12 +489,18 @@ export default function RunPage() {
                   onChange={setKind}
                   options={[
                     { value: "replay", label: "Scripted" },
-                    { value: "live", label: <><Sparkles className="size-3.5" /> Live</>, disabled: !canLive, title: canLive ? `${status?.model} tool-calling loop` : "Needs GEMINI_API_KEY" },
+                    { value: "live", label: <><Sparkles className="size-3.5" /> Live</>, disabled: !canLive, title: canLive ? `${status?.model} tool-calling loop` : "Needs a working Gemini key" },
                   ]}
                 />
               </div>
               <p className="mt-1.5 text-[12px] text-muted">
-                {kind === "replay" ? "Fixed tool calls: shows enforcement holds whatever the agent sends." : `${status?.model} decides its own tool calls.`}
+                {kind === "replay" ? "Fixed tool calls: shows enforcement holds whatever the agent sends." : `${status?.model} decides its own tool calls, using ${status?.llm?.source === "yours" ? "your Gemini key" : "the server's Gemini key"}.`}
+                {!canLive && (
+                  <>
+                    {" "}
+                    <UseOwnKeyButton className="text-[12px]" /> to run it live.
+                  </>
+                )}
               </p>
               <button className="btn btn-primary btn-lg mt-4 w-full" disabled={!!busy || running || !agent} onClick={doStart}>
                 {running ? <Spinner /> : <Play className="size-4" />}

@@ -8,6 +8,7 @@ type Listener = (ev: StreamEvent) => void;
 
 type Live = {
   status: Status | null;
+  refreshStatus: () => void;
   statusError: string | null;
   connected: boolean;
   holds: Hold[];
@@ -56,7 +57,7 @@ export function LiveProvider({ children }: { children: React.ReactNode }) {
 
   return (
     <LiveContext.Provider
-      value={{ status: status.data, statusError: status.error, connected, holds: holds.data?.holds ?? [], refreshHolds, subscribe }}
+      value={{ status: status.data, refreshStatus, statusError: status.error, connected, holds: holds.data?.holds ?? [], refreshHolds, subscribe }}
     >
       {children}
     </LiveContext.Provider>

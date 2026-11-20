@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
+	"net/http/cookiejar"
 	"net/http/httptest"
 	"strings"
 	"testing"
@@ -20,9 +21,16 @@ import (
 )
 
 type harness struct {
-	t   *testing.T
-	s   *testkit.Stack
-	url string
+	t      *testing.T
+	s      *testkit.Stack
+	url    string
+	client *http.Client // one browser: keeps its own cookies
+}
+
+// browser returns a second client against the same server, with its own cookie jar.
+func (h *harness) browser() *harness {
+	jar, _ := cookiejar.New(nil)
+	return &harness{t: h.t, s: h.s, url: h.url, client: &http.Client{Jar: jar}}
 }
 
 func newHarness(t *testing.T, geminiURL string) *harness {
@@ -36,7 +44,8 @@ func newHarness(t *testing.T, geminiURL string) *harness {
 		WS: s.WS, Hub: s.Hub, Runner: s.Runner, Scenarios: s.Scenarios, Store: s.Store, WebDir: t.TempDir(), StoreName: "memory"}
 	ts := httptest.NewServer(srv.Handler())
 	t.Cleanup(ts.Close)
-	return &harness{t: t, s: s, url: ts.URL}
+	h := &harness{t: t, s: s, url: ts.URL}
+	return h.browser()
 }
 
 func (h *harness) do(method, path string, body any) (int, map[string]any) {
@@ -47,7 +56,8 @@ func (h *harness) do(method, path string, body any) (int, map[string]any) {
 		rd = bytes.NewReader(b)
 	}
 	req, _ := http.NewRequest(method, h.url+path, rd)
-	resp, err := http.DefaultClient.Do(req)
+	req.Header.Set(api.ClientHeader, "test")
+	resp, err := h.client.Do(req)
 	if err != nil {
 		h.t.Fatal(err)
 	}

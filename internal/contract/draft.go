@@ -35,7 +35,7 @@ type Compiler struct {
 	Validator Validator
 }
 
-// Configured reports whether Gemini drafting is available.
+// Configured reports whether Gemini drafting is available with the server key.
 func (c *Compiler) Configured() bool { return c.APIKey != "" && c.Model != "" }
 
 // geminiDraft is the only shape accepted from the model.
@@ -107,7 +107,11 @@ Rules:
 // Draft produces a candidate contract for an instruction. When Gemini is not
 // configured, fails, or returns something the validator rejects, the
 // pre-written template is returned instead and a warning explains why.
-func (c *Compiler) Draft(ctx context.Context, instruction string) Draft {
+//
+// apiKey, when set, is a key the judge added in their own browser; it is used
+// for this draft only and is never stored by the compiler. Empty means the
+// server key.
+func (c *Compiler) Draft(ctx context.Context, instruction, apiKey string) Draft {
 	instruction = strings.TrimSpace(instruction)
 	now := time.Now()
 	fallback := func(why string) Draft {
@@ -118,7 +122,11 @@ func (c *Compiler) Draft(ctx context.Context, instruction string) Draft {
 		}
 		return d
 	}
-	if !c.Configured() {
+	key := c.APIKey
+	if apiKey != "" {
+		key = apiKey
+	}
+	if key == "" || c.Model == "" {
 		return fallback("Gemini is not configured (no GEMINI_API_KEY); showing the pre-written contract.")
 	}
 	// An overloaded model is retried, then the fallback models are tried in order.
@@ -135,14 +143,14 @@ attempts:
 				case <-time.After(wait):
 				}
 			}
-			gd, err = c.askGemini(ctx, model, instruction)
+			gd, err = c.askGemini(ctx, key, model, instruction)
 			if err == nil || !overloaded(err) {
 				break attempts
 			}
 		}
 	}
 	if err != nil {
-		return fallback("Gemini drafting failed (" + err.Error() + "); showing the pre-written contract.")
+		return fallback("Gemini drafting failed (" + strings.ReplaceAll(err.Error(), key, "[redacted]") + "); showing the pre-written contract.")
 	}
 	cid, tid := NewIDs()
 	cand := Contract{ContractID: cid, TaskID: tid, Instruction: instruction, Allow: gd.Allow, Deny: gd.Deny,
@@ -176,9 +184,9 @@ func overloaded(err error) bool {
 	return errors.Is(err, context.DeadlineExceeded)
 }
 
-func (c *Compiler) askGemini(ctx context.Context, model, instruction string) (geminiDraft, error) {
+func (c *Compiler) askGemini(ctx context.Context, apiKey, model, instruction string) (geminiDraft, error) {
 	var gd geminiDraft
-	cfg := &genai.ClientConfig{APIKey: c.APIKey, Backend: genai.BackendGeminiAPI}
+	cfg := &genai.ClientConfig{APIKey: apiKey, Backend: genai.BackendGeminiAPI}
 	if c.BaseURL != "" {
 		cfg.HTTPOptions = genai.HTTPOptions{BaseURL: c.BaseURL}
 	}

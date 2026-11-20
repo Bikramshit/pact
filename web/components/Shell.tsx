@@ -7,6 +7,7 @@ import { useEffect, useState } from "react";
 import { LiveProvider, useLive } from "@/lib/live";
 import { ToastProvider } from "@/lib/toast";
 import { HoldCenter } from "./HoldDialog";
+import { HEALTH_LABEL, ModelKeyProvider, brokenServerKey, useKeyDialog } from "./ModelKeyDialog";
 import { ThemeSwitch } from "./ThemeSwitch";
 import { Dot } from "./ui";
 
@@ -105,6 +106,7 @@ function Sidebar({ onNavigate }: { onNavigate?: () => void }) {
               <SystemRow icon={KeyRound} label="Signing keys" value={status?.key_backend === "cloud-kms" ? "Cloud KMS" : status ? "Local file" : "…"} tone={status?.key_backend === "cloud-kms" ? "ok" : undefined} />
               <SystemRow icon={Database} label="Store" value={status?.store === "postgresql" ? "PostgreSQL" : status?.store ?? "…"} />
               <SystemRow icon={Sparkles} label="Model" value={status ? (status.gemini_configured ? status.model : "No key") : "…"} tone={status && !status.gemini_configured ? "neutral" : undefined} />
+              <KeyRow />
               <SystemRow icon={Radio} label="Live updates" value={connected ? "Connected" : "Reconnecting"} tone={connected ? "ok" : "warn"} />
             </>
           )}
@@ -118,11 +120,45 @@ function Sidebar({ onNavigate }: { onNavigate?: () => void }) {
   );
 }
 
+/** The Gemini key this browser's runs use; opens the dialog to add or remove one. */
+function KeyRow() {
+  const { status } = useLive();
+  const open = useKeyDialog();
+  const llm = status?.llm;
+  if (!llm || !llm.user_keys_enabled) return null;
+  const mine = llm.source === "yours" && llm.yours;
+  const value = mine ? `Yours ••••${llm.yours!.last4}` : llm.server === "missing" ? "None" : `Server, ${HEALTH_LABEL[llm.server]}`;
+  const tone = mine ? (llm.yours!.status === "ok" ? "ok" : "bad") : brokenServerKey(llm.server) ? "bad" : llm.server === "ok" ? "ok" : "neutral";
+  return (
+    <button onClick={open} className="-mx-1.5 flex w-[calc(100%+0.75rem)] items-center gap-2.5 rounded-md px-1.5 py-1.5 text-left hover:bg-subtle" title="Use your own Gemini key">
+      <KeyRound className="size-3.5 shrink-0 text-muted" />
+      <span className="flex-1 text-[12.5px] whitespace-nowrap text-ink-2">Gemini key</span>
+      <span className="flex min-w-0 items-center gap-1.5 text-[12.5px] font-medium">
+        <Dot tone={tone} />
+        <span className="truncate">{value}</span>
+      </span>
+    </button>
+  );
+}
+
 function Banners() {
   const { status } = useLive();
+  const openKey = useKeyDialog();
   if (!status) return null;
+  const llm = status.llm;
   return (
     <>
+      {llm && llm.user_keys_enabled && llm.source !== "yours" && brokenServerKey(llm.server) && (
+        <div className="flex flex-wrap items-center justify-center gap-x-3 gap-y-1 border-b border-warn/30 bg-warn-soft px-6 py-2 text-[13px]">
+          <KeyRound className="size-4 text-warn" />
+          <span>
+            {llm.server === "missing" ? <b>No server Gemini key is set.</b> : <b>The server&rsquo;s Gemini key is {HEALTH_LABEL[llm.server]}.</b>} Live features need a working key.
+          </span>
+          <button onClick={openKey} className="rounded-full bg-inverse px-3 py-0.5 text-[12.5px] font-semibold text-on-inverse">
+            Use your own key
+          </button>
+        </div>
+      )}
       {status.mode === "off" && (
         <div className="flex items-center justify-center gap-2 border-b border-bad/30 bg-bad-soft px-6 py-2 text-[13px]">
           <ShieldOff className="size-4 text-bad" />
@@ -185,7 +221,9 @@ export function Shell({ children }: { children: React.ReactNode }) {
   return (
     <ToastProvider>
       <LiveProvider>
-        <Frame>{children}</Frame>
+        <ModelKeyProvider>
+          <Frame>{children}</Frame>
+        </ModelKeyProvider>
       </LiveProvider>
     </ToastProvider>
   );

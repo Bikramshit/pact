@@ -19,6 +19,7 @@ What PACT MVP 0.1 defends, against whom, and where it stops.
 | `pact-core` (broker, policy, keys, evidence) | Trusted | It holds the credentials and makes every decision. Kept to one small Go service. |
 | Host and container runtime | Trusted | Network isolation is enforced by Docker. |
 | The user who confirms a contract | Trusted | Their confirmation is what gets signed. |
+| A judge who adds their own Gemini key | Trusted with their key only | Their key is used for their runs only; it grants nothing else. |
 | Gemini (drafting and the agent's model) | Untrusted | Advisory only: never holds a key, never decides. Its drafts are validated and need confirmation. |
 | The agent | Untrusted | Assumed fully compromised or misaligned. |
 | Repository content, tool output, network responses | Untrusted | Attacker-controllable text. |
@@ -45,6 +46,8 @@ What PACT MVP 0.1 defends, against whom, and where it stops.
 | Someone with database access edits a decision record | Hash chain and signatures: verification names the record | T3, `make tamper` |
 | Someone deletes the newest records | Signed checkpoint kept outside the database | `make truncate` |
 | Logging fails, so an action goes unrecorded | Fail closed: no record, no result | broker tests |
+| Another website acts through a judge's signed-in browser: approves a hold, resets the demo, adds or removes a key | Every state-changing control-plane request needs the `X-PACT-Client` header, which a browser will not add cross-site; `Sec-Fetch-Site: cross-site` is refused; the dashboard cannot be framed | API tests |
+| A judge's own Gemini key leaks, or is used by someone else | Held encrypted in memory only, for one browser (`HttpOnly`, `SameSite=Strict` cookie), referenced elsewhere by a random handle; never sent to the agent or back to any browser; deleted after 2 hours unused | vault and API tests, including a scan of the store, evidence, events, logs and assignments for the key |
 
 ## What PACT does not do
 

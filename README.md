@@ -73,6 +73,7 @@ On stage, also run `make bypass-test` in a terminal: a direct `curl` from the ag
 - **Exfiltration gate.** The mirror of taint-gating: once a session has read data the contract marks confidential, outbound requests are held even to hosts the contract allows. Each step is permitted on its own; PACT stops the combination. Together the two gates keep private data, untrusted content and a way out from meeting in one session unseen (S9, S10).
 - **Truncation-proof evidence.** A signed checkpoint (record count and newest hash) is kept on the data volume, apart from PostgreSQL. `make truncate` deletes the newest record; `make verify` then reports that records are missing.
 - **Reviewer outages are not scored.** If the reviewing model does not answer after three tries, the call is still blocked, but that run is marked as an outage and left out of the supervisor's figures.
+- **Bring your own Gemini key.** If the server's key is out of quota or missing, any judge can add their own key in the dashboard. It is held encrypted in memory only, used only for runs started from that browser, never sent to the agent or shown again, and deleted after 2 hours unused. See [Using the platform](docs/USING_THE_PLATFORM.md#bring-your-own-gemini-key).
 - **Model fallback.** When the configured Gemini model is overloaded or rate-limited, calls move to the next model in `GEMINI_FALLBACK_MODELS`; the busy model is skipped for a few minutes. Every run reports which models actually answered.
 - **Cloud KMS** for the signing keys: see below.
 
@@ -189,6 +190,8 @@ Set in `.env` (see `.env.example`). Only `pact-core` receives these values.
 | `GEMINI_MODEL` | `gemini-3.8-flash` | Model for both; every proxied call is pinned to it or to a fallback |
 | `GEMINI_FALLBACK_MODELS` | `gemini-3.7-flash,gemini-3.6-flash,gemini-3.5-flash-lite` | Tried in order when the model above is overloaded |
 | `PACT_KMS_ORG_KEY`, `PACT_KMS_ISSUER_KEY` | empty | Cloud KMS key versions for the org and issuer keys (`make up-kms`) |
+| `PACT_USER_KEYS` | on | `off` stops judges adding their own Gemini key in the dashboard |
+| `PACT_USER_KEY_IDLE` | `2h` | How long an unused judge key is kept in memory (12 hours at most) |
 | `PACT_MODE` | `on` | `off` turns the broker into a passthrough |
 | `PACT_POLICY_ENGINE` | `opa` | `native` switches to the Go matcher (same decisions; tested against OPA) |
 | `PACT_HOLD_TIMEOUT` | `120s` | How long a held request waits before it is rejected |

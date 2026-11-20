@@ -21,7 +21,7 @@ blocked() { # description, service, command...
   fi
 }
 
-curl -fsS -X POST "$API/v1/demo/reset" -d '{}' >/dev/null || { echo "control plane not reachable at $API; is the stack up?"; exit 2; }
+curl -fsS -X POST -H 'X-PACT-Client: cli' "$API/v1/demo/reset" -d '{}' >/dev/null || { echo "control plane not reachable at $API; is the stack up?"; exit 2; }
 
 SINK_IP=$(ip_of sink); SECRETS_IP=$(ip_of secrets)
 

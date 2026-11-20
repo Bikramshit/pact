@@ -28,6 +28,7 @@ import (
 	"github.com/foxcolab/pact/internal/scenario"
 	"github.com/foxcolab/pact/internal/scoreboard"
 	"github.com/foxcolab/pact/internal/store"
+	"github.com/foxcolab/pact/internal/userkeys"
 	"github.com/foxcolab/pact/internal/workspace"
 )
 
@@ -45,6 +46,7 @@ type Stack struct {
 	Scenarios []scenario.Scenario
 	BrokerURL string
 	Agent     *agentclient.Client
+	UserKeys  *userkeys.Vault
 }
 
 // Options adjusts the stack.
@@ -57,6 +59,10 @@ type Options struct {
 	// StandInModel serves the scripted stand-in for the Gemini API, so code paths
 	// that call a model (the AI-supervisor baseline) can run in tests.
 	StandInModel bool
+	// GeminiURL points model calls at a test server instead (overrides StandInModel).
+	GeminiURL string
+	// ServerKey is the operator's Gemini key for GeminiURL; empty means none is configured.
+	ServerKey string
 }
 
 // RepoRoot walks up from the working directory to the module root.
@@ -121,7 +127,15 @@ func New(t testing.TB, opts Options) *Stack {
 	if opts.StandInModel {
 		cfg.GeminiAPIKey, cfg.GeminiModel, cfg.GeminiBaseURL = "test-key", "stand-in", serve(mocktargets.NewHandler("fakegemini", "")).URL
 	}
+	if opts.GeminiURL != "" {
+		cfg.GeminiAPIKey, cfg.GeminiModel, cfg.GeminiBaseURL = opts.ServerKey, "test-model", opts.GeminiURL
+	}
 	ex := executors.New(cfg)
+	vault, err := userkeys.New(userkeys.Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ex.SetKeyResolver(vault)
 	br := broker.New(broker.Config{Mode: opts.Mode, AllowOffMode: opts.AllowOffMode, HoldTimeout: opts.HoldTimeout}, st, ks, reg, dec, ev, ex, ws, hub)
 	brokerSrv := serve(br.Handler())
 
@@ -129,7 +143,7 @@ func New(t testing.TB, opts Options) *Stack {
 	if err != nil {
 		t.Fatal(err)
 	}
-	s := &Stack{Store: st, Keys: ks, Contracts: reg, Broker: br, Evidence: ev, Exec: ex, WS: ws, Hub: hub, Scenarios: scs, BrokerURL: brokerSrv.URL}
+	s := &Stack{Store: st, Keys: ks, Contracts: reg, Broker: br, Evidence: ev, Exec: ex, WS: ws, Hub: hub, Scenarios: scs, BrokerURL: brokerSrv.URL, UserKeys: vault}
 	s.Runner = &scoreboard.Runner{Broker: br, Contracts: reg, Exec: ex, WS: ws, Evidence: ev, Store: st, Hub: hub, Scenarios: scs,
 		Defaults: contract.DefaultsFor("web-app")}
 

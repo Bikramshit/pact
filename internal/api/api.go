@@ -25,6 +25,7 @@ import (
 	"github.com/foxcolab/pact/internal/scenario"
 	"github.com/foxcolab/pact/internal/scoreboard"
 	"github.com/foxcolab/pact/internal/store"
+	"github.com/foxcolab/pact/internal/userkeys"
 	"github.com/foxcolab/pact/internal/workspace"
 )
 
@@ -43,9 +44,13 @@ type Server struct {
 	Store     store.Store
 	WebDir    string
 	StoreName string
+	// UserKeys holds Gemini keys judges add in their own browsers. Nil turns the
+	// feature off (PACT_USER_KEYS=off).
+	UserKeys *userkeys.Vault
 
 	mu     sync.Mutex
 	drafts map[string]contract.Draft
+	checks []time.Time // recent key checks across all browsers, for a global limit
 }
 
 // Handler returns the control-plane routes.
@@ -54,6 +59,9 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) { writeJSON(w, 200, obj{"ok": true}) })
 	mux.HandleFunc("GET /v1/status", s.status)
 	mux.HandleFunc("GET /v1/keys", s.publicKeys)
+	mux.HandleFunc("GET /v1/session/key", s.getUserKey)
+	mux.HandleFunc("POST /v1/session/key", s.putUserKey)
+	mux.HandleFunc("DELETE /v1/session/key", s.deleteUserKey)
 
 	mux.HandleFunc("POST /v1/contracts/draft", s.draft)
 	mux.HandleFunc("POST /v1/contracts/{id}/confirm", s.confirm)
@@ -95,7 +103,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /v1/redteam", s.startRedteam)
 
 	mux.Handle("/", s.static())
-	return mux
+	return guard(mux)
 }
 
 type obj = map[string]any
@@ -135,7 +143,8 @@ func (s *Server) status(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, obj{
 		"mode":              s.Broker.Mode(),
 		"policy_engine":     s.Broker.PolicyEngine(),
-		"gemini_configured": s.Exec.LLMConfigured(),
+		"gemini_configured": s.llmAvailable(r),
+		"llm":               s.llmInfo(r),
 		"model":             s.Exec.Model(),
 		"llm_backend":       s.Exec.LLMBackend(),
 		"fallback_models":   s.Exec.FallbackModels(),
@@ -175,7 +184,12 @@ func (s *Server) draft(w http.ResponseWriter, r *http.Request) {
 		t := contract.Template(strings.TrimSpace(body.Instruction), s.Compiler.Defaults, time.Now())
 		d = contract.Draft{Contract: t, Summary: contract.Describe(t), Ambiguities: []string{}, DraftedBy: "template", Warnings: []string{}}
 	} else {
-		d = s.Compiler.Draft(r.Context(), body.Instruction)
+		apiKey, err := s.userKey(r)
+		if err != nil {
+			fail(w, 409, err)
+			return
+		}
+		d = s.Compiler.Draft(r.Context(), body.Instruction, apiKey.Reveal())
 	}
 	s.mu.Lock()
 	if s.drafts == nil {
@@ -355,8 +369,8 @@ func (s *Server) startTask(w http.ResponseWriter, r *http.Request) {
 		fail(w, 400, errors.New("replay needs a scenario with a script"))
 		return
 	}
-	if body.Kind == "live" && !s.Exec.LLMConfigured() {
-		fail(w, 409, errors.New("GEMINI_API_KEY is not set, so a live agent cannot run; use replay"))
+	if body.Kind == "live" && !s.llmAvailable(r) {
+		fail(w, 409, errors.New("no working Gemini key: add your own key, or use the scripted agent"))
 		return
 	}
 	if body.Reset {
@@ -365,7 +379,7 @@ func (s *Server) startTask(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	rec, err := s.Broker.MintCapability(r.Context(), c, broker.MintOptions{})
+	rec, err := s.Broker.MintCapability(r.Context(), c, broker.MintOptions{KeyRef: s.keyRef(r)})
 	if err != nil {
 		fail(w, 400, err)
 		return
@@ -670,16 +684,16 @@ func (s *Server) startScoreboard(w http.ResponseWriter, r *http.Request) {
 		fail(w, 400, errors.New("agent must be replay or live"))
 		return
 	}
-	if body.Agent == "live" && !s.Exec.LLMConfigured() {
-		fail(w, 409, errors.New("GEMINI_API_KEY is not set, so a live scoreboard run is not possible; use the replay agent"))
+	if body.Agent == "live" && !s.llmAvailable(r) {
+		fail(w, 409, errors.New("no working Gemini key: add your own key, or use the scripted agent"))
 		return
 	}
-	if body.Supervisor && !s.Exec.LLMConfigured() {
-		fail(w, 409, errors.New("the AI-supervisor baseline needs GEMINI_API_KEY"))
+	if body.Supervisor && !s.llmAvailable(r) {
+		fail(w, 409, errors.New("the AI-supervisor baseline needs a Gemini key: add your own key"))
 		return
 	}
 	run, err := s.Runner.Start(scoreboard.RunOptions{AgentKind: body.Agent, Quick: body.Quick, Supervisor: body.Supervisor, MaxSteps: body.MaxSteps,
-		Timeout: time.Duration(body.Timeout) * time.Second})
+		Timeout: time.Duration(body.Timeout) * time.Second, KeyRef: s.keyRef(r)})
 	if err != nil {
 		fail(w, 409, err)
 		return
@@ -747,12 +761,12 @@ func (s *Server) startRedteam(w http.ResponseWriter, r *http.Request) {
 		fail(w, 400, errors.New("injection is limited to 8000 characters"))
 		return
 	}
-	if !s.Exec.LLMConfigured() {
-		fail(w, 409, errors.New("GEMINI_API_KEY is not set: a red-team run needs the live agent"))
+	if !s.llmAvailable(r) {
+		fail(w, 409, errors.New("no working Gemini key: a red-team run needs the live agent, so add your own key"))
 		return
 	}
 	readme := strings.TrimRight(s.Runner.BenignReadme(), "\n") + "\n\n" + body.Injection + "\n"
-	run, err := s.Runner.StartRedteam(scoreboard.RedteamOptions{Readme: readme, Supervisor: body.Supervisor, Interactive: body.Interactive, Plain: body.Plain})
+	run, err := s.Runner.StartRedteam(scoreboard.RedteamOptions{Readme: readme, Supervisor: body.Supervisor, Interactive: body.Interactive, Plain: body.Plain, KeyRef: s.keyRef(r)})
 	if err != nil {
 		fail(w, 409, err)
 		return

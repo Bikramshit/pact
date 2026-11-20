@@ -79,6 +79,32 @@ func (c *Client) plain(ctx context.Context, method, path string, body, out any) 
 	return resp.StatusCode, nil
 }
 
+// Generate makes one signed model call through the broker's Gemini proxy.
+func (c *Client) Generate(ctx context.Context, token string, request any) (int, map[string]any, error) {
+	body, _ := json.Marshal(map[string]any{"request": request})
+	return c.signed(ctx, token, "/v1/llm/generate", body)
+}
+
+func (c *Client) signed(ctx context.Context, token, path string, body []byte) (int, map[string]any, error) {
+	nb := make([]byte, 12)
+	_, _ = rand.Read(nb)
+	ts, nonce := time.Now().UTC().Format(time.RFC3339), hex.EncodeToString(nb)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.BrokerURL+path, bytes.NewReader(body))
+	if err != nil {
+		return 0, nil, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set(broker.HeaderCapability, token)
+	req.Header.Set(broker.HeaderTimestamp, ts)
+	req.Header.Set(broker.HeaderNonce, nonce)
+	sig, err := c.key.Sign([]byte(broker.SigningString(http.MethodPost, path, body, ts, nonce)))
+	if err != nil {
+		return 0, nil, err
+	}
+	req.Header.Set(broker.HeaderSignature, sig)
+	return c.do(req)
+}
+
 // Call makes one signed tool call. tamper may be "", "capability_scope" or "reuse_nonce".
 func (c *Client) Call(ctx context.Context, token, tool string, args map[string]any, tamper string) (int, map[string]any, error) {
 	if tamper == "reuse_nonce" && c.last != nil {

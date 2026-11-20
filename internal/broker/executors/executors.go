@@ -16,6 +16,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/foxcolab/pact/internal/userkeys"
 )
 
 // Config locates the targets and holds the broker's credentials for them.
@@ -47,10 +49,12 @@ type Targets struct {
 	egress *http.Client
 	llm    *http.Client
 
-	mu      sync.Mutex
-	usage   map[string]int       // calls answered, per model
-	cooling map[string]time.Time // models to skip until the given time
-	strikes map[string]int       // consecutive failures, for a growing cooldown
+	mu           sync.Mutex
+	usage        map[string]int       // calls answered, per model
+	cooling      map[string]time.Time // key|model pairs to skip until the given time
+	strikes      map[string]int       // consecutive failures per key|model, for a growing cooldown
+	serverStatus string               // the server key's health, as last observed
+	resolver     KeyResolver          // judges' own keys, when enabled
 	// rateWait is how long to wait for a rate limit to clear before trying again.
 	rateWait time.Duration
 }
@@ -95,9 +99,6 @@ func (t *Targets) LLMBackend() string {
 	}
 	return "gemini"
 }
-
-// LLMConfigured reports whether a Gemini API key is present.
-func (t *Targets) LLMConfigured() bool { return t.cfg.GeminiAPIKey != "" }
 
 func (t *Targets) doJSON(ctx context.Context, method, url, token string, body any) (map[string]any, int, error) {
 	var rd io.Reader
@@ -224,24 +225,120 @@ func retryable(status int) bool {
 	return status == http.StatusTooManyRequests || status >= 500
 }
 
-// Generate forwards a generateContent request to Gemini with the broker's API
-// key. A model that is overloaded, rate-limited or hangs is put on a cooldown
-// (five minutes, growing if it keeps failing; twenty seconds for a rate limit,
-// which is then waited out) and the next model is tried, so a busy model costs one
-// slow call rather than failing a task. The configured model is used again as
-// soon as its cooldown ends. It returns the model that answered.
-func (t *Targets) Generate(ctx context.Context, body []byte) (status int, raw []byte, model string, err error) {
-	if t.cfg.GeminiAPIKey == "" {
-		return 0, nil, "", errors.New("GEMINI_API_KEY is not configured")
+// KeyResolver turns a handle recorded on a capability into a judge's own key.
+// The vault in internal/userkeys implements it.
+type KeyResolver interface {
+	KeyFor(handle string) (userkeys.Secret, error)
+	Report(handle, status string)
+}
+
+// SetKeyResolver lets Generate use keys judges added in the dashboard.
+func (t *Targets) SetKeyResolver(r KeyResolver) { t.resolver = r }
+
+// HasServerKey reports whether the operator configured a Gemini key.
+func (t *Targets) HasServerKey() bool { return t.cfg.GeminiAPIKey != "" && t.cfg.GeminiModel != "" }
+
+// Available reports whether a model call can be made for a run bound to keyRef:
+// with the judge's own key if keyRef names one, otherwise with the server key.
+func (t *Targets) Available(keyRef string) bool {
+	if keyRef != "" {
+		return t.resolver != nil && t.cfg.GeminiModel != ""
 	}
+	return t.HasServerKey()
+}
+
+// ServerKeyStatus is the server key's health as last observed on a real call.
+func (t *Targets) ServerKeyStatus() string {
+	if t.cfg.GeminiAPIKey == "" {
+		return userkeys.StatusMissing
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.serverStatus == "" {
+		return userkeys.StatusUnknown
+	}
+	return t.serverStatus
+}
+
+// keyFor returns the key to use for keyRef and a label that keeps one key's
+// cooldowns apart from another's. It never falls back from a judge's key to
+// the server key: a run bills only the key it was started with.
+func (t *Targets) keyFor(keyRef string) (userkeys.Secret, string, error) {
+	if keyRef == "" {
+		if t.cfg.GeminiAPIKey == "" {
+			return userkeys.Secret{}, "", errors.New("GEMINI_API_KEY is not configured")
+		}
+		return userkeys.NewSecret(t.cfg.GeminiAPIKey), "server", nil
+	}
+	if t.resolver == nil {
+		return userkeys.Secret{}, "", errors.New("keys added in the dashboard are not enabled on this server")
+	}
+	key, err := t.resolver.KeyFor(keyRef)
+	if err != nil {
+		return userkeys.Secret{}, "", err
+	}
+	return key, keyRef, nil
+}
+
+// note records a key's health after a call.
+func (t *Targets) note(source, keyRef, status string) {
+	if status == "" {
+		return
+	}
+	if source == "server" {
+		t.mu.Lock()
+		t.serverStatus = status
+		t.mu.Unlock()
+		return
+	}
+	if t.resolver != nil {
+		t.resolver.Report(keyRef, status)
+	}
+}
+
+// Classify reads a Gemini response as a statement about the key: whether it
+// works, is out of quota, is invalid, lacks permission, or the service is busy.
+func Classify(status int, raw []byte, err error) string {
+	if err != nil {
+		return userkeys.StatusUnreachable
+	}
+	body := strings.ToLower(string(raw))
+	switch {
+	case status == http.StatusOK:
+		return userkeys.StatusOK
+	case status == http.StatusTooManyRequests && (strings.Contains(body, "exceeded your current quota") || strings.Contains(body, "check your plan and billing")):
+		return userkeys.StatusQuotaExhausted
+	case status == http.StatusTooManyRequests:
+		return userkeys.StatusRateLimited
+	case status == http.StatusUnauthorized, strings.Contains(body, "api_key_invalid"), strings.Contains(body, "api key not valid"), strings.Contains(body, "api key expired"):
+		return userkeys.StatusInvalid
+	case status == http.StatusForbidden:
+		return userkeys.StatusPermission
+	case status >= 500:
+		return userkeys.StatusOverloaded
+	}
+	return ""
+}
+
+// Generate forwards a generateContent request to Gemini, with the judge's own
+// key when keyRef names one and the server key otherwise. A model that is
+// overloaded, out of quota or hangs is put on a cooldown (five minutes, growing
+// if it keeps failing) and the next model is tried; a short rate limit is
+// waited out instead. Cooldowns are kept per key, so one judge's exhausted quota
+// does not bench a model for anyone else. It returns the model that answered.
+func (t *Targets) Generate(ctx context.Context, keyRef string, body []byte) (status int, raw []byte, model string, err error) {
 	if t.cfg.GeminiModel == "" {
 		return 0, nil, "", errors.New("GEMINI_MODEL is not configured")
+	}
+	key, source, err := t.keyFor(keyRef)
+	if err != nil {
+		return 0, nil, "", err
 	}
 	ctx, cancel := context.WithTimeout(ctx, 130*time.Second)
 	defer cancel()
 	for round := 0; ; round++ {
 		limited := false
-		for _, model = range t.candidates() {
+		for _, model = range t.candidates(source) {
 			for _, wait := range []time.Duration{0, 1500 * time.Millisecond} {
 				if wait > 0 {
 					select {
@@ -250,26 +347,29 @@ func (t *Targets) Generate(ctx context.Context, body []byte) (status int, raw []
 					case <-time.After(wait):
 					}
 				}
-				status, raw, err = t.generateOnce(ctx, model, body)
+				status, raw, err = t.generateOnce(ctx, key, model, body)
 				if err == nil && !retryable(status) {
-					t.noteAnswer(model)
+					t.noteAnswer(source, model)
+					t.note(source, keyRef, Classify(status, raw, nil))
 					return status, raw, model, nil
 				}
 				if ctx.Err() != nil {
+					t.note(source, keyRef, Classify(status, raw, err))
 					return status, raw, model, lastErr(err, ctx.Err())
 				}
-				if err != nil {
-					break // hung or unreachable: do not wait on it a second time
+				if err != nil || Classify(status, raw, nil) == userkeys.StatusQuotaExhausted {
+					break // hung, unreachable or out of quota: asking again will not help
 				}
 			}
-			// A rate limit clears in seconds; overload and hangs take minutes.
-			if err == nil && status == http.StatusTooManyRequests {
+			// A short rate limit clears in seconds; quota, overload and hangs take longer.
+			if err == nil && Classify(status, raw, nil) == userkeys.StatusRateLimited {
 				limited = true
-				t.coolDownFor(model, t.rateWait)
+				t.coolDownFor(source, model, t.rateWait)
 			} else {
-				t.coolDown(model)
+				t.coolDown(source, model)
 			}
 		}
+		t.note(source, keyRef, Classify(status, raw, err))
 		// Every model failed. If a rate limit was among the reasons, the request
 		// itself is fine: wait for the limit to clear and go round again.
 		if !limited || round >= 3 {
@@ -283,16 +383,47 @@ func (t *Targets) Generate(ctx context.Context, body []byte) (status int, raw []
 	}
 }
 
-// candidates lists the models to try, in configured order, leaving out any on
-// cooldown. If every model is cooling down they are all tried anyway.
-func (t *Targets) candidates() []string {
+// ValidateKey checks a key a judge wants to add, with one tiny request per
+// model until one answers. It returns the model that answered, or the status
+// that explains why none did. It spends a handful of tokens of the judge's quota.
+func (t *Targets) ValidateKey(ctx context.Context, key string) (model, status string) {
+	if t.cfg.GeminiModel == "" {
+		return "", userkeys.StatusUnknown
+	}
+	ctx, cancel := context.WithTimeout(ctx, 60*time.Second)
+	defer cancel()
+	body := []byte(`{"contents":[{"role":"user","parts":[{"text":"Reply with the word OK."}]}],"generationConfig":{"maxOutputTokens":16,"temperature":0}}`)
+	secret := userkeys.NewSecret(key)
+	status = userkeys.StatusUnknown
+	for _, m := range append([]string{t.cfg.GeminiModel}, t.cfg.GeminiFallbackModels...) {
+		code, raw, err := t.generateOnce(ctx, secret, m, body)
+		st := Classify(code, raw, err)
+		switch st {
+		case userkeys.StatusOK:
+			return m, userkeys.StatusOK
+		case userkeys.StatusInvalid, userkeys.StatusPermission:
+			return "", st // a problem with the key itself: other models will say the same
+		case "":
+			st = userkeys.StatusUnknown // e.g. this model is not available to the key; try the next
+		}
+		status = st
+		if ctx.Err() != nil {
+			break
+		}
+	}
+	return "", status
+}
+
+// candidates lists the models to try for one key, in configured order, leaving
+// out any on cooldown for that key. If every model is cooling down they are all tried anyway.
+func (t *Targets) candidates(source string) []string {
 	all := append([]string{t.cfg.GeminiModel}, t.cfg.GeminiFallbackModels...)
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	now := time.Now()
 	var ready []string
 	for _, m := range all {
-		if now.After(t.cooling[m]) {
+		if now.After(t.cooling[source+"|"+m]) {
 			ready = append(ready, m)
 		}
 	}
@@ -302,27 +433,28 @@ func (t *Targets) candidates() []string {
 	return ready
 }
 
-// coolDown takes a model out of rotation: five minutes the first time, doubling
-// each time it fails again straight after coming back, up to forty.
-func (t *Targets) coolDown(model string) {
+// coolDown takes a model out of rotation for one key: five minutes the first
+// time, doubling each time it fails again straight after coming back, up to forty.
+func (t *Targets) coolDown(source, model string) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	t.strikes[model]++
-	d := 5 * time.Minute << min(t.strikes[model]-1, 3)
-	t.cooling[model] = time.Now().Add(d)
+	k := source + "|" + model
+	t.strikes[k]++
+	d := 5 * time.Minute << min(t.strikes[k]-1, 3)
+	t.cooling[k] = time.Now().Add(d)
 }
 
-// coolDownFor takes a model out of rotation for a fixed time without counting a strike.
-func (t *Targets) coolDownFor(model string, d time.Duration) {
+// coolDownFor takes a model out of rotation for one key for a fixed time, without counting a strike.
+func (t *Targets) coolDownFor(source, model string, d time.Duration) {
 	t.mu.Lock()
-	t.cooling[model] = time.Now().Add(d)
+	t.cooling[source+"|"+model] = time.Now().Add(d)
 	t.mu.Unlock()
 }
 
-func (t *Targets) noteAnswer(model string) {
+func (t *Targets) noteAnswer(source, model string) {
 	t.mu.Lock()
 	t.usage[model]++
-	delete(t.strikes, model)
+	delete(t.strikes, source+"|"+model)
 	t.mu.Unlock()
 }
 
@@ -344,7 +476,7 @@ func lastErr(err, fallback error) error {
 	return fallback
 }
 
-func (t *Targets) generateOnce(ctx context.Context, model string, body []byte) (int, []byte, error) {
+func (t *Targets) generateOnce(ctx context.Context, key userkeys.Secret, model string, body []byte) (int, []byte, error) {
 	endpoint := fmt.Sprintf("%s/v1beta/models/%s:generateContent", strings.TrimRight(t.cfg.GeminiBaseURL, "/"), url.PathEscape(model))
 	ctx, cancel := context.WithTimeout(ctx, 35*time.Second)
 	defer cancel()
@@ -353,9 +485,10 @@ func (t *Targets) generateOnce(ctx context.Context, model string, body []byte) (
 		return 0, nil, err
 	}
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("x-goog-api-key", t.cfg.GeminiAPIKey)
+	req.Header.Set("x-goog-api-key", key.Reveal())
 	resp, err := t.llm.Do(req)
 	if err != nil {
+		// Transport errors carry the URL, never headers, so the key is not in them.
 		return 0, nil, fmt.Errorf("gemini unreachable: %w", err)
 	}
 	defer resp.Body.Close()

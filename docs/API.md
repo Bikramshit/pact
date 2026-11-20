@@ -9,6 +9,8 @@
 
 All bodies are JSON. Errors are `{"error": "…"}` with a 4xx or 5xx status.
 
+**Every state-changing control-plane request** (`POST`, `PUT`, `DELETE` under `/v1/`) must carry an `X-PACT-Client` header (any value) and must not be marked `Sec-Fetch-Site: cross-site`; otherwise it is refused with 403. This stops another website from acting through a signed-in browser. The dashboard and `scripts/pact.py` send it; add it to your own scripts: `curl -H 'X-PACT-Client: cli' -X POST …`. Reads need no header.
+
 ## Broker (port 9090)
 
 ### `POST /v1/tools/{tool}`
@@ -68,6 +70,16 @@ The Gemini proxy. It needs the same four headers and the `llm:gemini:generate` s
 | `GET /v1/status` | Mode, policy engine, model and fallbacks, models used, key backend, agents online, store |
 | `GET /v1/keys` | Org, issuer and evidence public keys; their backends (local or Cloud KMS); whether the org key's certificate for the evidence key verifies |
 | `GET /v1/stats` | Counts of records, allowed, denied, held, approved, rejected, model calls, taint reads, tasks |
+
+### Your own Gemini key
+
+| Endpoint | Does |
+| --- | --- |
+| `GET /v1/session/key` | Whether this browser has a key: last 4 characters, added, last used, expiry, health. Never the key. |
+| `POST /v1/session/key` `{"key"}` | Checks the key with one tiny Gemini request and, if it works, keeps it for this browser (sets the `pact_sid` cookie, `HttpOnly`, `SameSite=Strict`). 400 with `status` (`invalid`, `permission`, `quota_exhausted`, …) if it does not work; 429 after 5 checks in 10 minutes. |
+| `DELETE /v1/session/key` | Deletes this browser's key from the server and clears the cookie |
+
+`GET /v1/status` includes an `llm` block for the calling browser: `available`, `source` (`yours`, `server` or `none`), `server` (the server key's health: `ok`, `quota_exhausted`, `invalid`, `permission`, `missing`, …), `yours` and `user_keys_enabled`. Drafts, tasks, scoreboard runs and red-team runs started by a browser with a key use that key; runs report it as `key_source`.
 
 ### Contracts and tasks
 

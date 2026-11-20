@@ -20,7 +20,11 @@ NAMES = {"off": "without PACT", "supervisor": "AI supervisor", "on": "with PACT"
 
 def call(path, body=None, timeout=900):
     data = None if body is None else json.dumps(body).encode()
-    req = urllib.request.Request(API + path, data=data, headers={"Content-Type": "application/json"} if data else {})
+    # The control plane refuses state-changing requests without this header (CSRF protection).
+    headers = {"X-PACT-Client": "cli"}
+    if data:
+        headers["Content-Type"] = "application/json"
+    req = urllib.request.Request(API + path, data=data, headers=headers)
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             return json.load(resp)

@@ -88,6 +88,7 @@ export type Status = {
   llm_backend: string;
   model: string;
   fallback_models?: string[];
+  llm?: LLMInfo;
   key_backend?: string;
   models_used?: Record<string, number>;
   agents_online: number;
@@ -190,6 +191,7 @@ export type ScoreRun = {
   modes?: Mode[];
   models_used?: Record<string, number>;
   title?: string;
+  key_source?: string;
   error?: string;
 };
 
@@ -229,4 +231,17 @@ export type RunInfo = {
   scenarios: number;
   modes: Mode[];
   summary: Record<string, ScoreSummary>;
+};
+
+export type KeyHealth = "ok" | "quota_exhausted" | "invalid" | "permission" | "overloaded" | "rate_limited" | "unreachable" | "missing" | "unknown";
+
+/** What the dashboard may know about a key a judge added. Never the key itself. */
+export type UserKeyInfo = { last4: string; added_at: string; last_used: string; expires_at: string; status: KeyHealth; model?: string };
+
+export type LLMInfo = {
+  available: boolean;
+  source: "yours" | "server" | "none";
+  server: KeyHealth;
+  yours: UserKeyInfo | null;
+  user_keys_enabled: boolean;
 };

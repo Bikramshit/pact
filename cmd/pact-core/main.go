@@ -34,6 +34,7 @@ import (
 	"github.com/foxcolab/pact/internal/scenario"
 	"github.com/foxcolab/pact/internal/scoreboard"
 	"github.com/foxcolab/pact/internal/store"
+	"github.com/foxcolab/pact/internal/userkeys"
 	"github.com/foxcolab/pact/internal/workspace"
 )
 
@@ -186,6 +187,32 @@ func serve() error {
 		GeminiFallbackModels: fallbacks,
 	})
 
+	// Judges may add their own Gemini key in the dashboard. Each key lives only in
+	// this process's memory, for one browser, for a limited time.
+	var userKeys *userkeys.Vault
+	if os.Getenv("PACT_USER_KEYS") != "off" {
+		idle, err := time.ParseDuration(env("PACT_USER_KEY_IDLE", "2h"))
+		if err != nil {
+			return fmt.Errorf("PACT_USER_KEY_IDLE: %w", err)
+		}
+		if userKeys, err = userkeys.New(userkeys.Options{Idle: idle}); err != nil {
+			return err
+		}
+		exec.SetKeyResolver(userKeys)
+		go func() {
+			t := time.NewTicker(time.Minute)
+			defer t.Stop()
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case <-t.C:
+					userKeys.Sweep()
+				}
+			}
+		}()
+	}
+
 	defaults := contract.DefaultsFor(wsName)
 	validator := contract.Validator{Workspaces: []string{wsName}, MaxTTL: 24 * time.Hour}
 	registry := &contract.Registry{Store: st, Org: ks.Org, Validator: validator}
@@ -203,7 +230,7 @@ func serve() error {
 	br := broker.New(broker.Config{Mode: mode, AllowOffMode: os.Getenv("PACT_SCOREBOARD") == "1", HoldTimeout: holdTimeout}, st, ks, registry, dec, ev, exec, ws, hub)
 	runner := &scoreboard.Runner{Broker: br, Contracts: registry, Exec: exec, WS: ws, Evidence: ev, Store: st, Hub: hub, Scenarios: scenarios, Defaults: defaults}
 	control := &api.Server{Broker: br, Contracts: registry, Compiler: compiler, Evidence: ev, Keys: ks, Exec: exec, WS: ws, Hub: hub,
-		Runner: runner, Scenarios: scenarios, Store: st, WebDir: env("PACT_WEB_DIR", "web/out"), StoreName: storeName}
+		Runner: runner, Scenarios: scenarios, Store: st, WebDir: env("PACT_WEB_DIR", "web/out"), StoreName: storeName, UserKeys: userKeys}
 
 	// Two ports, kept apart: the control plane faces the user, the broker faces the agent.
 	brokerAllow, err := netguard.ParseCIDRs(os.Getenv("PACT_BROKER_ALLOW_CIDRS"))
@@ -234,7 +261,7 @@ func serve() error {
 	}()
 
 	log.Printf("control plane on %s, broker on %s", controlLn.Addr(), brokerLn.Addr())
-	log.Printf("mode=%s policy=%s store=%s gemini=%v model=%s scenarios=%d", mode, dec.Name(), storeName, exec.LLMConfigured(), model, len(scenarios))
+	log.Printf("mode=%s policy=%s store=%s gemini=%v model=%s scenarios=%d user-keys=%v", mode, dec.Name(), storeName, exec.HasServerKey(), model, len(scenarios), userKeys != nil)
 	log.Printf("keys: org=%s issuer=%s evidence=%s (certified by the org key)", ks.Org.Backend, ks.Issuer.Backend, ks.Evidence.Backend)
 	log.Printf("evidence public key %s", ks.Evidence.PublicString())
 	if mode == broker.ModeOff {

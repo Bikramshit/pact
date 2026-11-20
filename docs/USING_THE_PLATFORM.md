@@ -21,7 +21,30 @@ Open **http://127.0.0.1:8080**. The control plane is bound to localhost only.
 | `make up-offline` | A scripted stand-in replaces the Gemini API, for rehearsing with no key or internet. A banner on every page says it is not Gemini. |
 | `make up-kms` | The org and issuer signing keys are held in Google Cloud KMS. Setup is in the README. |
 
+If the server's key stops working (out of quota, for example), any judge can [add their own Gemini key](#bring-your-own-gemini-key) for their own browser.
+
 The sidebar shows the system state at all times: enforcement on or off, agent online, policy engine, where the signing keys are, the store, the model, and whether live updates are connected. The switch at the bottom sets light, dark or system theme.
+
+## Bring your own Gemini key
+
+The live features (Gemini drafting, the live agent, Break it, the AI supervisor) need a working Gemini key. If the server's key is out of quota, invalid or not set, a banner says so and offers **Use your own key**. The same dialog opens from the sidebar's *Gemini key* row, and from the prompt next to any disabled *Live* control.
+
+1. Get a key from [Google AI Studio](https://aistudio.google.com/apikey) and paste it into the dialog.
+2. *Check and save* sends one tiny request to Gemini with it. Only a key that works is kept. The dialog says which model answered, or why the key failed: invalid, not allowed to use the Gemini API, or out of quota.
+3. From then on, everything you start in this browser uses your key: drafts, live tasks, scoreboard runs and Break it runs. The scoreboard and Break it show "billed to your key". Other judges are not affected.
+4. *Remove key* deletes it from the server at once.
+
+How the key is protected:
+
+- It is sent over HTTPS to the control plane only, behind the dashboard password.
+- It is held encrypted (AES-256-GCM) in pact-core's memory only. It is never written to disk, the database, logs, the evidence chain or the live event stream.
+- It never reaches the agent. The agent's model calls go through the broker, which adds the key; capability records store only a random handle.
+- It is never shown again, only its last 4 characters.
+- It is tied to your browser by an `HttpOnly`, `SameSite=Strict` cookie. Another browser, or another website, cannot use it.
+- It is deleted after 2 hours unused (12 hours at most), when you remove it, or when the server restarts.
+- A browser can check at most 5 keys per 10 minutes.
+
+Whoever runs the server could still read its memory, as with any service you give a key to. Use a key you can revoke, and delete it in Google AI Studio after the demo. The operator can turn the feature off with `PACT_USER_KEYS=off`.
 
 ## Overview
 
@@ -135,6 +158,7 @@ These pages, rendered inside the platform. The same files are in [`docs/`](https
 | --- | --- |
 | "Control plane unreachable" in the sidebar | `make up`, wait until it reports healthy, reload |
 | "No agent" | `docker compose logs agent`; it registers within seconds of the broker starting |
-| Draft with Gemini is slow or falls back to the pre-written contract | The model is overloaded or out of quota; the warning says which. Use the pre-written contract and the scripted agent. |
+| Draft with Gemini is slow or falls back to the pre-written contract | The model is overloaded or out of quota; the warning says which. Add your own key, or use the pre-written contract and the scripted agent. |
+| "Refused: state-changing requests must come from the PACT dashboard" | A script called the control plane without the `X-PACT-Client` header. Add it (any value), as `scripts/pact.py` does. |
 | pact-core cannot reach the database after you changed `POSTGRES_PASSWORD` | The password is only applied when the volume is first created; see the README |
 | Evidence is red before you tampered with anything | `make untamper`; if still red, `make clean && make up` (this deletes the evidence) |

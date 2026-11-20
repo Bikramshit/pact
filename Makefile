@@ -103,4 +103,4 @@ untamper:
 	@sh scripts/tamper.sh restore
 
 reset:
-	@curl -fsS -X POST $(API)/v1/demo/reset -d '{}' && echo
+	@curl -fsS -X POST -H 'X-PACT-Client: cli' $(API)/v1/demo/reset -d '{}' && echo

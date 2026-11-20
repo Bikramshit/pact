@@ -482,7 +482,7 @@ func (b *Broker) execute(ctx context.Context, sess *Session, req policy.Request,
 		if len(body) == 0 {
 			return nil, nil, errors.New("request is required")
 		}
-		status, raw, model, err := b.exec.Generate(ctx, body)
+		status, raw, model, err := b.exec.Generate(ctx, sess.KeyRef, body)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -508,7 +508,7 @@ func (b *Broker) passthrough(ctx context.Context, rec CapabilityRecord, claimed 
 	}
 	sess, err := b.Session(ctx, claimed.CapID)
 	if err != nil {
-		sess = Session{SessionID: claimed.CapID, AgentID: claimed.AgentID, TaskID: rec.TaskID, Mode: ModeOff}
+		sess = Session{SessionID: claimed.CapID, AgentID: claimed.AgentID, TaskID: rec.TaskID, Mode: ModeOff, KeyRef: rec.KeyRef}
 	}
 	event := map[string]any{"task_id": sess.TaskID, "agent_id": sess.AgentID, "cap_id": claimed.CapID,
 		"tool": req.Tool, "resource": req.Resource, "op": req.Op}
@@ -593,15 +593,15 @@ func (b *Broker) review(ctx context.Context, rec CapabilityRecord, req policy.Re
 			case <-time.After(time.Duration(attempt) * 3 * time.Second):
 			}
 		}
-		if allow, reason, ok := b.reviewOnce(ctx, body); ok {
+		if allow, reason, ok := b.reviewOnce(ctx, rec.KeyRef, body); ok {
 			return allow, reason, true
 		}
 	}
 	return false, "the supervisor model was unavailable", false
 }
 
-func (b *Broker) reviewOnce(ctx context.Context, body []byte) (allow bool, reason string, ok bool) {
-	status, raw, _, err := b.exec.Generate(ctx, body)
+func (b *Broker) reviewOnce(ctx context.Context, keyRef string, body []byte) (allow bool, reason string, ok bool) {
+	status, raw, _, err := b.exec.Generate(ctx, keyRef, body)
 	if err != nil || status != http.StatusOK {
 		return false, "", false
 	}

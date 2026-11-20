@@ -10,12 +10,20 @@ export class ApiError extends Error {
   }
 }
 
+/**
+ * Every request carries this header. The control plane refuses state-changing
+ * requests without it, so another website cannot act through a judge's
+ * signed-in browser (browsers cannot add it cross-site without permission).
+ */
+const CLIENT_HEADER = { "X-PACT-Client": "dashboard" };
+
 export async function api<T>(path: string, body?: unknown, method?: string): Promise<T> {
   const res = await fetch(path, {
     method: method ?? (body === undefined ? "GET" : "POST"),
-    headers: body === undefined ? undefined : { "Content-Type": "application/json" },
+    headers: body === undefined ? CLIENT_HEADER : { ...CLIENT_HEADER, "Content-Type": "application/json" },
     body: body === undefined ? undefined : JSON.stringify(body),
     cache: "no-store",
+    credentials: "same-origin",
   });
   let data: any = null;
   try {

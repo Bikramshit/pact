@@ -55,6 +55,9 @@ type Options struct {
 	ConfirmedBy     string
 	// Custom, when set, is run instead of a seed scenario (the red-team page).
 	Custom *scenario.Scenario
+	// KeyRef names the Gemini key the run's model calls use (a judge's own, by
+	// handle). Empty means the server key.
+	KeyRef string
 }
 
 // StepCheck compares one scripted step with what the broker answered.
@@ -218,7 +221,7 @@ func (r *Runner) runScenario(ctx context.Context, opts Options) (Result, error) 
 	if err != nil {
 		return fail(err)
 	}
-	capRec, err := r.Broker.MintCapability(ctx, signed, broker.MintOptions{Mode: opts.Mode, AutoRejectHolds: opts.AutoRejectHolds})
+	capRec, err := r.Broker.MintCapability(ctx, signed, broker.MintOptions{Mode: opts.Mode, AutoRejectHolds: opts.AutoRejectHolds, KeyRef: opts.KeyRef})
 	if err != nil {
 		return fail(err)
 	}

@@ -49,6 +49,7 @@ type CapabilityRecord struct {
 	Mode            string             `json:"mode"`
 	Revoked         bool               `json:"revoked"`
 	AutoRejectHolds bool               `json:"auto_reject_holds"`
+	KeyRef          string             `json:"key_ref,omitempty"` // handle only; see MintOptions
 	CreatedAt       string             `json:"created_at"`
 }
 
@@ -80,6 +81,7 @@ type Session struct {
 	Confidential        bool       `json:"confidential,omitempty"`
 	ConfidentialSources []string   `json:"confidential_sources,omitempty"`
 	LastTest            *TestState `json:"last_test,omitempty"`
+	KeyRef              string     `json:"key_ref,omitempty"` // which Gemini key the agent's model calls use (a handle)
 	Calls               int        `json:"calls"`
 	UpdatedAt           string     `json:"updated_at"`
 }
@@ -144,6 +146,9 @@ func (b *Broker) PolicyEngine() string { return b.policy.Name() }
 type MintOptions struct {
 	Mode            string // "" means the broker default
 	AutoRejectHolds bool   // resolve holds as rejected at once (scoreboard runs)
+	// KeyRef is the handle of the Gemini key the run's model calls use: a key a
+	// judge added in their browser. Empty means the server key. Never the key itself.
+	KeyRef string
 }
 
 // MintCapability issues a scoped, expiring capability for a confirmed contract,
@@ -170,7 +175,7 @@ func (b *Broker) MintCapability(ctx context.Context, c contract.Contract, opts M
 	if mode != ModeOn && b.cfg.Mode != ModeOff && !b.cfg.AllowOffMode {
 		return CapabilityRecord{}, errors.New("running a session with PACT off is not enabled on this broker")
 	}
-	if mode == ModeSupervisor && !b.exec.LLMConfigured() {
+	if mode == ModeSupervisor && !b.exec.Available(opts.KeyRef) {
 		return CapabilityRecord{}, errors.New("the AI-supervisor baseline needs a Gemini API key")
 	}
 	exp := now.Add(b.cfg.CapTTL)
@@ -186,12 +191,12 @@ func (b *Broker) MintCapability(ctx context.Context, c contract.Contract, opts M
 		return CapabilityRecord{}, err
 	}
 	rec := CapabilityRecord{CapID: p.CapID, Token: token, Payload: p, TaskID: c.TaskID, ContractID: c.ContractID,
-		Mode: mode, AutoRejectHolds: opts.AutoRejectHolds, CreatedAt: now.Format(time.RFC3339)}
+		Mode: mode, AutoRejectHolds: opts.AutoRejectHolds, KeyRef: opts.KeyRef, CreatedAt: now.Format(time.RFC3339)}
 	if err := store.PutJSON(ctx, b.store, store.KindCapability, rec.CapID, rec, true); err != nil {
 		return CapabilityRecord{}, err
 	}
 	sess := Session{SessionID: rec.CapID, TaskID: c.TaskID, AgentID: agent.AgentID, ContractHash: c.Hash, Mode: mode,
-		TaintSources: []SessionTaint{}, UpdatedAt: now.Format(time.RFC3339)}
+		TaintSources: []SessionTaint{}, KeyRef: opts.KeyRef, UpdatedAt: now.Format(time.RFC3339)}
 	if err := store.PutJSON(ctx, b.store, store.KindSession, sess.SessionID, sess, false); err != nil {
 		return CapabilityRecord{}, err
 	}

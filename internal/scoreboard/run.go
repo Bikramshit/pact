@@ -48,6 +48,10 @@ type Run struct {
 	ModelsUsed map[string]int `json:"models_used,omitempty"`
 	Error      string         `json:"error,omitempty"`
 	Title      string         `json:"title,omitempty"`
+	// KeySource says whose Gemini key the run's model calls used: "your key"
+	// (added in the browser that started it) or "server key". Empty when the
+	// run made no model calls.
+	KeySource string `json:"key_source,omitempty"`
 }
 
 // RunOptions configures a scoreboard pass.
@@ -59,6 +63,17 @@ type RunOptions struct {
 	Modes     []string // default: off, then on
 	// Supervisor adds the AI-supervisor baseline between the two.
 	Supervisor bool
+	KeyRef     string // see Options.KeyRef
+}
+
+func keySource(keyRef string, usesModel bool) string {
+	switch {
+	case !usesModel:
+		return ""
+	case keyRef != "":
+		return "your key"
+	}
+	return "server key"
 }
 
 type job struct {
@@ -96,6 +111,7 @@ func (r *Runner) Start(opts RunOptions) (Run, error) {
 	if opts.AgentKind == "live" {
 		run.Model = r.Exec.Model()
 	}
+	run.KeySource = keySource(opts.KeyRef, opts.AgentKind == "live" || opts.Supervisor)
 	r.mu.Lock()
 	r.current = run
 	r.mu.Unlock()
@@ -107,7 +123,7 @@ func (r *Runner) Start(opts RunOptions) (Run, error) {
 		for _, mode := range opts.Modes {
 			for i, j := range jobs {
 				res, _ := r.runScenario(ctx, Options{Scenario: j.scenario, Variant: j.variant, Mode: mode, AgentKind: opts.AgentKind,
-					AutoRejectHolds: true, Timeout: opts.Timeout, MaxSteps: opts.MaxSteps, Seed: 1000 + i})
+					AutoRejectHolds: true, Timeout: opts.Timeout, MaxSteps: opts.MaxSteps, Seed: 1000 + i, KeyRef: opts.KeyRef})
 				r.mu.Lock()
 				run.Results = append(run.Results, res)
 				run.Done++
@@ -218,6 +234,7 @@ type RedteamOptions struct {
 	// Plain drops the warning sentence from the task, as most real requests have none.
 	Plain   bool
 	Timeout time.Duration
+	KeyRef  string // see Options.KeyRef
 }
 
 // PlainInstruction is the task without the "do not access secrets" warning.
@@ -245,7 +262,8 @@ func (r *Runner) StartRedteam(opts RedteamOptions) (Run, error) {
 	custom := &scenario.Scenario{ID: "RT", Title: "Your injection", Kind: "attack", Instruction: instruction,
 		ExpectCompletion: true, Variants: []scenario.Variant{{ID: "a", Overlay: map[string]string{ReadmePath: opts.Readme}}}}
 	run := &Run{ID: newRunID(), Status: "running", StartedAt: time.Now().UTC().Format(time.RFC3339), AgentKind: opts.AgentKind, Model: r.Exec.Model(),
-		Total: len(modes), Scenarios: 1, Results: []Result{}, Summary: map[string]Summary{}, Modes: modes, Title: instruction}
+		Total: len(modes), Scenarios: 1, Results: []Result{}, Summary: map[string]Summary{}, Modes: modes, Title: instruction,
+		KeySource: keySource(opts.KeyRef, true)}
 	r.mu.Lock()
 	r.redteam = run
 	r.mu.Unlock()
@@ -256,7 +274,7 @@ func (r *Runner) StartRedteam(opts RedteamOptions) (Run, error) {
 		ctx := context.Background()
 		for _, mode := range modes {
 			res, _ := r.runScenario(ctx, Options{Custom: custom, Mode: mode, AgentKind: opts.AgentKind, AutoRejectHolds: !opts.Interactive,
-				Timeout: opts.Timeout, ConfirmedBy: "red-team"})
+				Timeout: opts.Timeout, ConfirmedBy: "red-team", KeyRef: opts.KeyRef})
 			r.mu.Lock()
 			run.Results = append(run.Results, res)
 			run.Done++

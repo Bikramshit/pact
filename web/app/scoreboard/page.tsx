@@ -3,6 +3,7 @@
 import { CircleCheck, CirclePause, CircleX, Clock, FlaskConical, Info, Play, Sparkles, TriangleAlert } from "lucide-react";
 import { useState } from "react";
 import { ScoreArt } from "@/components/illustrations/Spots";
+import { UseOwnKeyButton } from "@/components/ModelKeyDialog";
 import { EFFECTS, MODES, MODE_ORDER, Outcome, latency, modelsUsed } from "@/components/Score";
 import { Card, CardHeader, Empty, PageHeader, Segmented, Skeleton, Spinner, StatusBadge } from "@/components/ui";
 import { api, dateTime, usePoll } from "@/lib/api";
@@ -173,7 +174,7 @@ export default function ScoreboardPage() {
               onChange={setAgent}
               options={[
                 { value: "replay", label: "Scripted" },
-                { value: "live", label: <><Sparkles className="size-3.5" /> Live</>, disabled: !canLive, title: canLive ? `${status?.model} tool-calling loop` : "Needs GEMINI_API_KEY" },
+                { value: "live", label: <><Sparkles className="size-3.5" /> Live</>, disabled: !canLive, title: canLive ? `${status?.model} tool-calling loop` : "Needs a working Gemini key" },
               ]}
             />
           </div>
@@ -189,7 +190,7 @@ export default function ScoreboardPage() {
               onChange={setBaseline}
               options={[
                 { value: "off", label: "Unprotected" },
-                { value: "supervisor", label: "+ AI supervisor", disabled: !canLive, title: canLive ? "A second model call reviews every tool call" : "Needs GEMINI_API_KEY" },
+                { value: "supervisor", label: "+ AI supervisor", disabled: !canLive, title: canLive ? "A second model call reviews every tool call" : "Needs a working Gemini key" },
               ]}
             />
           </div>
@@ -198,6 +199,11 @@ export default function ScoreboardPage() {
             {running ? "Running…" : "Run again"}
           </button>
         </div>
+        {!canLive && (
+          <p className="border-t border-line px-5 py-2.5 text-[12.5px] text-muted">
+            The live agent and the AI-supervisor comparison need a working Gemini key. <UseOwnKeyButton className="text-[12.5px]" />
+          </p>
+        )}
         {error && <p className="border-t border-line bg-bad-soft px-5 py-2.5 text-[13px]">{error}</p>}
         <div className="border-t border-line bg-raised px-5 py-3">
           {run ? (
@@ -226,6 +232,7 @@ export default function ScoreboardPage() {
               {used && (
                 <p className="mt-0.5 text-[12.5px] text-muted">
                   Model calls answered by: <span className="code text-ink-2">{used}</span>
+                  {run.key_source && <>, billed to {run.key_source}</>}
                 </p>
               )}
               {run.status === "running" && (

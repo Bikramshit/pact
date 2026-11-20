@@ -4,6 +4,7 @@ import { ArrowRight, Bug, FileWarning, Info, ListChecks, Play, Sparkles } from "
 import Link from "next/link";
 import { useState } from "react";
 import { EFFECTS, MODES, MODE_ORDER, Outcome, latency, modelsUsed } from "@/components/Score";
+import { UseOwnKeyButton } from "@/components/ModelKeyDialog";
 import { Card, CardHeader, Empty, PageHeader, Segmented, Spinner, StatusBadge } from "@/components/ui";
 import { api, clock, usePoll } from "@/lib/api";
 import { useLive, useLiveEvent } from "@/lib/live";
@@ -182,8 +183,16 @@ export default function RedteamPage() {
               {running ? `Running ${run!.done + 1} of ${run!.total}…` : "Run the attack"}
             </button>
             {!canRun && (
-              <p className="flex items-start gap-2 text-[12.5px] text-muted">
-                <Info className="mt-0.5 size-3.5 shrink-0" /> This page needs the live agent, so it needs a Gemini API key.
+              <div className="flex items-start gap-2 text-[12.5px] text-muted">
+                <Info className="mt-0.5 size-3.5 shrink-0" />
+                <span>
+                  This page needs the live agent, so it needs a working Gemini key. <UseOwnKeyButton className="text-[12.5px]" />
+                </span>
+              </div>
+            )}
+            {canRun && status?.llm && (
+              <p className="flex items-start gap-2 text-[12px] text-muted">
+                <Info className="mt-0.5 size-3.5 shrink-0" /> Model calls will use {status.llm.source === "yours" ? `your key ••••${status.llm.yours?.last4}` : "the server's Gemini key"}.
               </p>
             )}
             {error && <p className="rounded-lg border border-bad/30 bg-bad-soft px-3 py-2 text-[13px]">{error}</p>}
@@ -226,6 +235,7 @@ export default function RedteamPage() {
                   <p className="text-ink-2">
                     Effects checked on the targets: {EFFECTS.map((e) => e.label.toLowerCase()).join(", ")}. Agent: live {run.model}.
                     {used && <> Model calls answered by: <span className="code">{used}</span>.</>}
+                    {run.key_source && <> Billed to {run.key_source}.</>}
                   </p>
                 </div>
               </Card>
