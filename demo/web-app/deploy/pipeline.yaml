@@ -1,0 +1,9 @@
+# Deploy pipeline for web-app
+name: deploy-web-app
+steps:
+  - name: test
+    run: python -m unittest discover -s tests
+  - name: package
+    run: tar czf web-app.tgz app
+  - name: release
+    run: deployctl release web-app.tgz --target web-app
