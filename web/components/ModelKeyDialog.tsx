@@ -21,6 +21,10 @@ export const HEALTH_LABEL: Record<KeyHealth, string> = {
 };
 
 /** The server key is unusable for live features, not just busy for a moment. */
+/** Whose key a stored run used, worded for anyone viewing it (not only whoever started it). */
+export const billedTo = (keySource?: string) =>
+  keySource === "your key" ? "a judge's own key (added in the browser that started it)" : keySource === "server key" ? "the server's key" : keySource;
+
 export const brokenServerKey = (h?: KeyHealth) => h === "quota_exhausted" || h === "invalid" || h === "permission" || h === "missing";
 
 const PROTECTIONS = [
@@ -62,6 +66,9 @@ function ModelKeyDialog({ onClose }: { onClose: () => void }) {
   const [replacing, setReplacing] = useState(false);
   const [value, setValue] = useState("");
   const [reveal, setReveal] = useState(false);
+  // Where the browser can mask a text field, use one: a type="password" field
+  // makes Chrome offer to save the key in the password manager.
+  const [maskable] = useState(() => typeof CSS !== "undefined" && CSS.supports("-webkit-text-security", "disc"));
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const input = useRef<HTMLInputElement>(null);
@@ -183,8 +190,8 @@ function ModelKeyDialog({ onClose }: { onClose: () => void }) {
                   ref={input}
                   id="gemini-key"
                   name="pact-gemini-key"
-                  className="input code pr-10 !text-[13px]"
-                  type={reveal ? "text" : "password"}
+                  className={`input code pr-10 !text-[13px] ${!reveal && maskable ? "[-webkit-text-security:disc]" : ""}`}
+                  type={reveal || maskable ? "text" : "password"}
                   value={value}
                   onChange={(e) => setValue(e.target.value)}
                   placeholder="AIza…"
@@ -206,7 +213,14 @@ function ModelKeyDialog({ onClose }: { onClose: () => void }) {
                 </a>
                 <div className="flex gap-2">
                   {replacing && (
-                    <button type="button" className="btn btn-sm" onClick={() => setReplacing(false)}>
+                    <button
+                      type="button"
+                      className="btn btn-sm"
+                      onClick={() => {
+                        setReplacing(false);
+                        setValue("");
+                      }}
+                    >
                       Cancel
                     </button>
                   )}

@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -85,7 +86,20 @@ type Engine struct {
 
 	mu        sync.RWMutex
 	listeners []func(Record)
+
+	// appendMu makes appending a record and advancing the checkpoint one step,
+	// so the checkpoint never moves backwards and never names a record that a
+	// concurrent append has not finished storing.
+	appendMu   sync.Mutex
+	head       *Checkpoint // the newest checkpoint written or loaded by this process
+	headLoaded bool
 }
+
+// ErrBehindCheckpoint means the stored chain is shorter than, or ends
+// differently from, the signed checkpoint: records were deleted or replaced.
+// Appending then would reuse their sequence numbers and hide the deletion, so
+// the engine refuses, and the broker fails closed until the chain is restored.
+var ErrBehindCheckpoint = errors.New("evidence: the stored chain does not reach its signed checkpoint (records were deleted or replaced); refusing to append")
 
 // New returns an engine signing with the evidence key.
 func New(s store.Store, key *keys.KeyPair) *Engine { return &Engine{store: s, key: key} }
@@ -128,11 +142,54 @@ func (e *Engine) writeCheckpoint(count int64, head string) error {
 	if err != nil {
 		return err
 	}
-	tmp := e.checkpointPath + ".tmp"
-	if err := os.WriteFile(tmp, raw, 0o600); err != nil {
+	// Write a private temporary file, flush it to disk, then rename it over the
+	// old checkpoint, so a crash leaves either the old or the new one, never a
+	// torn file.
+	dir := filepath.Dir(e.checkpointPath)
+	f, err := os.CreateTemp(dir, ".checkpoint-*")
+	if err != nil {
 		return err
 	}
-	return os.Rename(tmp, e.checkpointPath)
+	tmp := f.Name()
+	defer os.Remove(tmp) // no-op after a successful rename
+	if _, err := f.Write(raw); err != nil {
+		_ = f.Close()
+		return err
+	}
+	if err := f.Sync(); err != nil {
+		_ = f.Close()
+		return err
+	}
+	if err := f.Close(); err != nil {
+		return err
+	}
+	if err := os.Rename(tmp, e.checkpointPath); err != nil {
+		return err
+	}
+	if d, err := os.Open(dir); err == nil {
+		_ = d.Sync()
+		_ = d.Close()
+	}
+	e.head = &cp
+	return nil
+}
+
+// loadHead returns the checkpoint appends must extend. It is read from disk
+// once and then kept in memory, so deleting the file while pact-core runs does
+// not switch the check off. Callers hold appendMu.
+func (e *Engine) loadHead() (*Checkpoint, error) {
+	if e.headLoaded {
+		return e.head, nil
+	}
+	cp, err := e.ReadCheckpoint()
+	if err != nil {
+		return nil, err
+	}
+	if cp != nil && !keys.Verify(e.key.Public, checkpointMessage(cp.Count, cp.HeadHash), cp.Sig) {
+		return nil, errors.New("evidence: the checkpoint file's signature is not valid for the evidence key; refusing to append")
+	}
+	e.head, e.headLoaded = cp, true
+	return cp, nil
 }
 
 // ReadCheckpoint returns the stored checkpoint, or nil if there is none.
@@ -170,9 +227,23 @@ func (e *Engine) Append(ctx context.Context, r Record) (Record, error) {
 	if r.Reasons == nil {
 		r.Reasons = []string{}
 	}
-	_, err := e.store.AppendEvidence(ctx, func(seq int64, prev string) (store.EvidenceRow, error) {
+	e.appendMu.Lock()
+	defer e.appendMu.Unlock()
+	head, err := e.loadHead()
+	if err != nil {
+		return Record{}, err
+	}
+	_, err = e.store.AppendEvidence(ctx, func(seq int64, prev string) (store.EvidenceRow, error) {
 		if prev == "" {
 			prev = Genesis
+		}
+		// The store may be ahead of the checkpoint (a crash between storing a
+		// record and writing the checkpoint), never behind it.
+		if head != nil {
+			stored := seq - 1
+			if stored < head.Count || (stored == head.Count && head.Count > 0 && prev != head.HeadHash) {
+				return store.EvidenceRow{}, ErrBehindCheckpoint
+			}
 		}
 		now := time.Now().UTC()
 		r.Seq = seq
@@ -250,6 +321,12 @@ type VerifyResult struct {
 
 // Verify walks the stored chain.
 func (e *Engine) Verify(ctx context.Context) (VerifyResult, error) {
+	// The checkpoint first: it is written after its record is stored, so read in
+	// this order it can never be ahead of the rows unless records were deleted.
+	cp, err := e.ReadCheckpoint()
+	if err != nil {
+		return VerifyResult{}, err
+	}
 	rows, err := e.store.Evidence(ctx, "")
 	if err != nil {
 		return VerifyResult{}, err
@@ -257,10 +334,6 @@ func (e *Engine) Verify(ctx context.Context) (VerifyResult, error) {
 	raw := make([]string, len(rows))
 	for i, r := range rows {
 		raw[i] = r.JSON
-	}
-	cp, err := e.ReadCheckpoint()
-	if err != nil {
-		return VerifyResult{}, err
 	}
 	return CheckAgainst(VerifyChain(raw, e.key.Public), raw, cp, e.key.Public), nil
 }
@@ -331,6 +404,11 @@ func VerifyChain(records []string, pub ed25519.PublicKey) VerifyResult {
 		if !keys.Verify(pub, []byte(hash), sig) {
 			return bad("signature is not valid for the evidence key")
 		}
+		// Records are stored in canonical form. Anything else (text appended,
+		// a repeated key, changed spacing) was edited outside the signed fields.
+		if c, err := canon.Canonicalize([]byte(raw)); err != nil || string(c) != raw {
+			return bad("stored text is not the exact signed record (it was edited)")
+		}
 		prev = hash
 	}
 	res.OK = true
@@ -371,17 +449,18 @@ type Export struct {
 
 // Export returns every stored record as its exact stored text.
 func (e *Engine) Export(ctx context.Context) (Export, error) {
+	cp, err := e.ReadCheckpoint() // before the rows, as in Verify
+	if err != nil {
+		return Export{}, err
+	}
 	rows, err := e.store.Evidence(ctx, "")
 	if err != nil {
 		return Export{}, err
 	}
 	ex := Export{PublicKey: e.key.PublicString(), ExportedAt: time.Now().UTC().Format(time.RFC3339), Records: make([]string, len(rows)),
-		OrgPublicKey: e.orgPublicKey, KeyCertificate: e.certificate}
+		Checkpoint: cp, OrgPublicKey: e.orgPublicKey, KeyCertificate: e.certificate}
 	for i, r := range rows {
 		ex.Records[i] = r.JSON
-	}
-	if ex.Checkpoint, err = e.ReadCheckpoint(); err != nil {
-		return Export{}, err
 	}
 	return ex, nil
 }
@@ -397,5 +476,12 @@ func VerifyExport(ex Export, pinnedKey string) (VerifyResult, error) {
 	if err != nil {
 		return VerifyResult{}, err
 	}
-	return CheckAgainst(VerifyChain(ex.Records, pub), ex.Records, ex.Checkpoint, pub), nil
+	res := CheckAgainst(VerifyChain(ex.Records, pub), ex.Records, ex.Checkpoint, pub)
+	if res.OK && ex.Checkpoint == nil && len(ex.Records) > 0 {
+		// Without the checkpoint, a bundle with its newest records cut off still
+		// verifies, so completeness cannot be shown.
+		res.OK = false
+		res.Problem = "the bundle has no signed checkpoint, so records deleted from its end could not be detected"
+	}
+	return res, nil
 }

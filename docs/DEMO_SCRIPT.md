@@ -48,7 +48,7 @@ Point at **Ground truth**.
 
 ## 2:10 It is not the agent behaving (20 s)
 
-Terminal: `make bypass-test`
+Terminal: `make bypass-test` (it resets the demo first, so show Ground truth before running it)
 
 > "From inside the agent's container, a direct call to the attacker host, the secret store or our own control plane has no route. This is the network, not a prompt."
 
@@ -68,7 +68,7 @@ Go to **Evidence**. "Every allow, deny and hold is a signed record chained to th
 
 Terminal: `make tamper`, then press *Verify chain*. "Someone with database access turned a denial into an allow. The chain breaks at exactly that record."
 
-Terminal: `make untamper`, then `make truncate`, *Verify chain*. "And if they delete the newest record instead, a signed checkpoint kept outside the database shows one is missing." `make untamper`.
+Terminal: `make untamper`, then `make truncate`, *Verify chain*. "And if they delete the newest record instead, a signed checkpoint kept outside the database shows one is missing. Until it is back, PACT refuses to record anything new, so the gap cannot be papered over, and with no record nothing executes." `make untamper`.
 
 ## 3:50 Close (10 s)
 

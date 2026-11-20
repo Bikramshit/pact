@@ -2,8 +2,10 @@ package evidence
 
 import (
 	"context"
+	"errors"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/foxcolab/pact/internal/keys"
@@ -14,7 +16,7 @@ func chain(t *testing.T, n int) (*Engine, *store.Memory) {
 	t.Helper()
 	mem := store.NewMemory()
 	key, _ := keys.Generate("evidence")
-	e := New(mem, key)
+	e := New(mem, key).WithCheckpoint(filepath.Join(t.TempDir(), "checkpoint.json"))
 	for i := 0; i < n; i++ {
 		dec := "allow"
 		if i%3 == 2 {
@@ -126,5 +128,95 @@ func TestCheckpointFollowsAppends(t *testing.T) {
 		if res, _ := e.Verify(context.Background()); !res.OK || res.Checkpoint.Count != int64(3*(round+1)) {
 			t.Fatalf("round %d: %+v", round, res)
 		}
+	}
+}
+
+// After the newest records are deleted, appending would reuse their sequence
+// numbers and re-sign the checkpoint, hiding the deletion. The engine refuses,
+// also after a restart, and accepts appends again once the chain is restored.
+func TestNoAppendAfterTruncation(t *testing.T) {
+	mem := store.NewMemory()
+	key, _ := keys.Generate("evidence")
+	path := filepath.Join(t.TempDir(), "checkpoint.json")
+	e := New(mem, key).WithCheckpoint(path)
+	rec := Record{TaskID: "t", Decision: "deny", Outcome: "not_executed"}
+	for i := 0; i < 5; i++ {
+		if _, err := e.Append(context.Background(), rec); err != nil {
+			t.Fatal(err)
+		}
+	}
+	gone := mem.DropNewestEvidence(2)
+	if _, err := e.Append(context.Background(), rec); !errors.Is(err, ErrBehindCheckpoint) {
+		t.Fatalf("append after truncation: %v", err)
+	}
+	restarted := New(mem, key).WithCheckpoint(path)
+	if _, err := restarted.Append(context.Background(), rec); !errors.Is(err, ErrBehindCheckpoint) {
+		t.Fatalf("append after truncation and restart: %v", err)
+	}
+	if res, _ := e.Verify(context.Background()); res.OK || !res.Truncated || res.Count != 3 {
+		t.Fatalf("truncation must stay visible: %+v", res)
+	}
+	mem.RestoreEvidence(gone)
+	if _, err := e.Append(context.Background(), rec); err != nil {
+		t.Fatalf("append after restore: %v", err)
+	}
+	if res, _ := e.Verify(context.Background()); !res.OK || res.Count != 6 || res.Checkpoint.Count != 6 {
+		t.Fatalf("restored chain: %+v", res)
+	}
+}
+
+// Concurrent appends each get their own sequence number, and the checkpoint
+// ends at the newest record.
+func TestConcurrentAppends(t *testing.T) {
+	e, _ := chain(t, 0)
+	var wg sync.WaitGroup
+	errs := make(chan error, 400)
+	for g := 0; g < 16; g++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for i := 0; i < 25; i++ {
+				if _, err := e.Append(context.Background(), Record{TaskID: "t", Decision: "allow", Outcome: "executed"}); err != nil {
+					errs <- err
+				}
+			}
+		}()
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		t.Fatal(err)
+	}
+	if res, _ := e.Verify(context.Background()); !res.OK || res.Count != 400 || res.Checkpoint.Count != 400 {
+		t.Fatalf("after concurrent appends: %+v", res)
+	}
+}
+
+// Edits that leave every signed field intact still change the stored text.
+func TestEditsOutsideSignedFieldsAreDetected(t *testing.T) {
+	for name, edit := range map[string]func(string) string{
+		"trailing text": func(js string) string { return js + ` {"decision":"allow"}` },
+		"stray bracket": func(js string) string { return js + `}` },
+		"repeated key": func(js string) string {
+			return strings.Replace(js, `"decision":"deny"`, `"decision":"allow","decision":"deny"`, 1)
+		},
+		"spacing": func(js string) string { return strings.Replace(js, `"decision":"deny"`, `"decision": "deny"`, 1) },
+	} {
+		e, mem := chain(t, 6)
+		mem.TamperEvidence(3, edit)
+		if res, _ := e.Verify(context.Background()); res.OK || res.FirstBadSeq != 3 {
+			t.Fatalf("%s went unnoticed: %+v", name, res)
+		}
+	}
+}
+
+// A bundle without its checkpoint cannot show that nothing was cut off.
+func TestExportWithoutCheckpointFails(t *testing.T) {
+	e, _ := chain(t, 4)
+	ex, _ := e.Export(context.Background())
+	ex.Records = ex.Records[:2]
+	ex.Checkpoint = nil
+	if res, _ := VerifyExport(ex, ""); res.OK {
+		t.Fatalf("a bundle with no checkpoint verified: %+v", res)
 	}
 }

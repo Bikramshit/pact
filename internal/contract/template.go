@@ -64,7 +64,10 @@ func Template(instruction string, d Defaults, now time.Time) Contract {
 }
 
 // ApplyDefaults overlays the organisation's trust labels on a drafted contract.
-// A baseline deny is dropped only when the draft explicitly allows that resource type.
+// A baseline deny is dropped only when the draft explicitly allows that resource
+// type (the draft then carries a warning). The model's taint_tolerant list is
+// replaced by the organisation's: an exemption only matters for an action the
+// gates would hold, so a model-chosen one could only switch a gate off.
 func ApplyDefaults(c *Contract, d Defaults, now time.Time) {
 	allowedTypes := map[string]bool{}
 	for _, g := range c.Allow {
@@ -82,6 +85,7 @@ func ApplyDefaults(c *Contract, d Defaults, now time.Time) {
 	}
 	c.Untrusted = append([]string{}, d.Untrusted...)
 	c.Confidential = append([]string{}, d.Confidential...)
+	c.TaintTolerant = append([]string{}, d.TaintTolerant...)
 	for _, s := range d.Sensitive {
 		if !contains(c.Sensitive, s) {
 			c.Sensitive = append(c.Sensitive, s)
@@ -93,6 +97,35 @@ func ApplyDefaults(c *Contract, d Defaults, now time.Time) {
 	}
 	c.ExpiresAt = now.Add(d.TTL).UTC().Format(time.RFC3339)
 	c.Version = 1
+	c.Normalize()
+}
+
+// KeepOrgLabels applies the organisation's trust labels to a contract a person
+// edited before signing. They may add untrusted, sensitive or confidential
+// patterns, never remove the organisation's, and may only narrow its
+// taint-tolerant list.
+func KeepOrgLabels(c *Contract, d Defaults) {
+	for _, pair := range []struct {
+		list *[]string
+		org  []string
+	}{{&c.Untrusted, d.Untrusted}, {&c.Sensitive, d.Sensitive}, {&c.Confidential, d.Confidential}} {
+		for _, p := range pair.org {
+			if !contains(*pair.list, p) {
+				*pair.list = append(*pair.list, p)
+			}
+		}
+	}
+	tolerant := []string{}
+	for _, t := range c.TaintTolerant {
+		if contains(d.TaintTolerant, t) {
+			tolerant = append(tolerant, t)
+		}
+	}
+	c.TaintTolerant = tolerant
+	c.Delegation = Delegation{Allowed: false}
+	if c.OnTaint != "deny" {
+		c.OnTaint = "hold"
+	}
 	c.Normalize()
 }
 

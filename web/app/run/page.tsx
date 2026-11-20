@@ -8,7 +8,7 @@ import { Feed, type FeedItem } from "@/components/Feed";
 import { GroundTruth } from "@/components/GroundTruth";
 import { FlowLegend, FlowMap, targetOf, type Outcome, type Pulse, type TargetCounts } from "@/components/illustrations/FlowMap";
 import { IdleArt } from "@/components/illustrations/Spots";
-import { UseOwnKeyButton } from "@/components/ModelKeyDialog";
+import { UseOwnKeyButton, brokenServerKey } from "@/components/ModelKeyDialog";
 import { Card, CardHeader, Empty, PageHeader, Segmented, Spinner, StatusBadge } from "@/components/ui";
 import { api, short, usePoll } from "@/lib/api";
 import { useLive, useLiveEvent } from "@/lib/live";
@@ -101,6 +101,9 @@ export default function RunPage() {
   const [kind, setKind] = useState<"live" | "replay">("replay");
   const [taskId, setTaskId] = useState<string | null>(null);
   const [assignmentId, setAssignmentId] = useState<string | null>(null);
+  // Every run of the same contract shares its task id, but each gets its own
+  // capability: records and events are matched to this run by cap_id.
+  const [capId, setCapId] = useState<string | null>(null);
 
   const [items, setItems] = useState<FeedItem[]>([]);
   const [pulses, setPulses] = useState<Pulse[]>([]);
@@ -119,6 +122,9 @@ export default function RunPage() {
 
   const agent = agents?.agents.find((a) => a.online) ?? null;
   const canLive = !!status?.gemini_configured;
+  // Live controls stay enabled while the server key looks broken (its status is
+  // only refreshed by using it), but the prompt to add your own key shows.
+  const keyTrouble = !canLive || (status?.llm?.source === "server" && brokenServerKey(status.llm.server));
   const runnable = (scenarios?.scenarios ?? []).filter((s) => s.kind !== "protocol");
   const scenario = runnable.find((s) => s.id === scenarioId) ?? null;
 
@@ -177,7 +183,8 @@ export default function RunPage() {
     [tally, refreshOracles],
   );
 
-  // A new task starts from a clean slate, plus anything the chain already holds for it.
+  // A new run starts from a clean slate, plus anything the chain already holds for it.
+  // Responses that arrive after the run changed are dropped.
   useEffect(() => {
     setItems([]);
     setPulses([]);
@@ -185,30 +192,35 @@ export default function RunPage() {
     setLast(null);
     setTainted(null);
     seen.current = new Set();
-    if (!taskId) return;
+    if (!taskId || !capId) return;
+    let current = true;
     api<{ records: EvidenceRecord[] }>(`/v1/evidence?task_id=${encodeURIComponent(taskId)}`)
-      .then((d) => ingest(d.records, false))
+      .then((d) => current && ingest(d.records.filter((r) => r.cap_id === capId), false))
       .catch(() => undefined);
-  }, [taskId, ingest]);
+    return () => {
+      current = false;
+    };
+  }, [taskId, capId, ingest]);
 
   // Fallback poll while the agent works, and one last read when it finishes.
   useEffect(() => {
-    if (!taskId) return;
+    if (!taskId || !capId) return;
+    let current = true;
     const pull = () =>
       api<{ records: EvidenceRecord[] }>(`/v1/evidence?task_id=${encodeURIComponent(taskId)}`)
-        .then((d) => ingest(d.records, true))
+        .then((d) => current && ingest(d.records.filter((r) => r.cap_id === capId), true))
         .catch(() => undefined);
-    if (!running) {
-      pull();
-      return;
-    }
-    const t = setInterval(pull, 2000);
-    return () => clearInterval(t);
-  }, [taskId, running, ingest]);
+    pull();
+    const t = running ? setInterval(pull, 2000) : undefined;
+    return () => {
+      current = false;
+      if (t) clearInterval(t);
+    };
+  }, [taskId, capId, running, ingest]);
 
   useLiveEvent((ev) => {
     const d = ev.data;
-    if (!taskId || d?.task_id !== taskId) return;
+    if (!capId || d?.cap_id !== capId) return;
     if (ev.type === "decision") {
       ingest([d as EvidenceRecord], true);
     } else if (ev.type === "unprotected") {
@@ -222,8 +234,8 @@ export default function RunPage() {
   });
 
   const pendingTargets = useMemo(
-    () => holds.filter((h) => h.status === "pending" && h.task_id === taskId).map((h) => targetOf(h.tool)),
-    [holds, taskId],
+    () => holds.filter((h) => h.status === "pending" && h.cap_id === capId).map((h) => targetOf(h.tool)),
+    [holds, capId],
   );
   const granted = useMemo(() => (signed ?? draft?.contract)?.allow.map((g) => g.resource.split(":")[0]), [signed, draft]);
 
@@ -244,6 +256,7 @@ export default function RunPage() {
       setSigned(null);
       setTaskId(null);
       setAssignmentId(null);
+      setCapId(null);
       setDraft(await api<Draft>("/v1/contracts/draft", { instruction, template }));
     });
 
@@ -266,9 +279,10 @@ export default function RunPage() {
   const doStart = () =>
     run("start", async () => {
       if (!signed) return;
-      const res = await api<{ task_id: string; assignment_id: string }>("/v1/tasks", { contract_id: signed.contract_id, kind, scenario: scenarioId, variant, reset: true });
+      const res = await api<{ task_id: string; cap_id: string; assignment_id: string }>("/v1/tasks", { contract_id: signed.contract_id, kind, scenario: scenarioId, variant, reset: true });
       setAssignmentId(res.assignment_id);
       setTaskId(res.task_id);
+      setCapId(res.cap_id);
       refreshOracles();
     });
 
@@ -277,6 +291,7 @@ export default function RunPage() {
     setSigned(null);
     setTaskId(null);
     setAssignmentId(null);
+    setCapId(null);
     setError(null);
   };
 
@@ -311,7 +326,7 @@ export default function RunPage() {
         {/* Steps */}
         <div className="space-y-4">
           <StepCard n={1} title="Describe the task" state={step === 1 ? "active" : "done"} summary={<p className="text-[13px] text-ink-2 italic">“{instruction}”</p>}>
-            <textarea className="input min-h-[96px] resize-y leading-relaxed" value={instruction} onChange={(e) => setInstruction(e.target.value)} aria-label="Task instruction" />
+            <textarea className="input min-h-[96px] resize-y leading-relaxed" value={instruction} onChange={(e) => setInstruction(e.target.value)} maxLength={4000} aria-label="Task instruction" />
             <div className="mt-2 flex flex-wrap gap-1.5">
               {SUGGESTIONS.map((s) => (
                 <button key={s.label} onClick={() => setInstruction(s.text)} className={`chip hover:border-line-strong hover:text-ink ${instruction === s.text ? "border-ink-2 text-ink" : ""}`}>
@@ -328,7 +343,7 @@ export default function RunPage() {
                 <FileSignature className="size-4" /> Use pre-written contract
               </button>
             </div>
-            {!canLive && (
+            {keyTrouble && (
               <div className="mt-3 flex items-start gap-2 text-[12.5px] text-muted">
                 <Info className="mt-0.5 size-3.5 shrink-0" />
                 <span>
@@ -440,7 +455,10 @@ export default function RunPage() {
                       <Link href={`/evidence/?task=${taskId}`} className="btn btn-primary btn-sm">
                         <ListChecks className="size-3.5" /> Evidence for this task
                       </Link>
-                      <button className="btn btn-sm" onClick={() => setAssignmentId(null)}>
+                      <button className="btn btn-sm" onClick={() => {
+                          setAssignmentId(null);
+                          setCapId(null);
+                        }}>
                         <RotateCcw className="size-3.5" /> Run again
                       </button>
                     </div>
@@ -495,7 +513,7 @@ export default function RunPage() {
               </div>
               <p className="mt-1.5 text-[12px] text-muted">
                 {kind === "replay" ? "Fixed tool calls: shows enforcement holds whatever the agent sends." : `${status?.model} decides its own tool calls, using ${status?.llm?.source === "yours" ? "your Gemini key" : "the server's Gemini key"}.`}
-                {!canLive && (
+                {keyTrouble && (
                   <>
                     {" "}
                     <UseOwnKeyButton className="text-[12px]" /> to run it live.
@@ -506,7 +524,7 @@ export default function RunPage() {
                 {running ? <Spinner /> : <Play className="size-4" />}
                 {running ? (assignment?.status === "running" ? "Agent is working…" : "Waiting for the agent…") : "Mint capability and start"}
               </button>
-              <p className="mt-2 text-center text-[12px] text-muted">Resets the repository and targets, then issues a 30-minute capability.</p>
+              <p className="mt-2 text-center text-[12px] text-muted">Resets the repository and targets, then issues a capability that ends when the contract does (30 minutes after drafting).</p>
             </StepCard>
           )}
 

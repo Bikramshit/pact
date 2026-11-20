@@ -64,7 +64,9 @@ export default function OverviewPage() {
   });
 
   const s = stats.data;
-  const v = verify.data;
+  // A failed check must not leave an earlier "Verified" on screen.
+  const v = verify.error ? null : verify.data;
+  const chainLabel = !v ? (verify.error ? "Not checked" : "…") : v.ok ? "Verified" : v.truncated ? "Records deleted" : v.first_bad_seq > 0 ? `Broken at #${v.first_bad_seq}` : "Broken";
   const agent = agents.data?.agents[0];
   const run = score.data?.run;
   const off = run?.summary.off;
@@ -123,14 +125,14 @@ export default function OverviewPage() {
         ) : (
           <>
             <Stat label="Decisions recorded" value={compact(s.records)} icon={ListChecks} hint={`across ${s.tasks} task${s.tasks === 1 ? "" : "s"}${s.last_at ? ` · last ${ago(s.last_at)}` : ""}`} />
-            <Stat label="Blocked actions" value={compact(s.denied + s.rejected)} icon={ShieldX} tone="bad" hint={`${s.denied} denied by contract · ${s.rejected} rejected by a human`} />
+            <Stat label="Blocked actions" value={compact(s.denied + s.rejected)} icon={ShieldX} tone="bad" hint={`${s.denied} denied by the broker · ${s.rejected} held and not approved`} />
             <Stat label="Held for approval" value={compact(s.held)} icon={CirclePause} tone="warn" hint={`${s.approved} approved · ${s.rejected} rejected or timed out`} />
             <Stat
               label="Evidence chain"
-              value={!v ? "…" : v.ok ? "Verified" : `Broken at #${v.first_bad_seq}`}
-              icon={v && !v.ok ? ShieldAlert : Link2}
-              tone={!v ? "neutral" : v.ok ? "ok" : "bad"}
-              hint={v ? (v.ok ? `${v.count} records · head ${short(v.head_hash, 8) || "empty"}` : v.problem ?? v.error) : "checking…"}
+              value={chainLabel}
+              icon={(v && !v.ok) || verify.error ? ShieldAlert : Link2}
+              tone={verify.error ? "bad" : !v ? "neutral" : v.ok ? "ok" : "bad"}
+              hint={verify.error ? `Could not check the chain: ${verify.error}` : v ? (v.ok ? `${v.count} records · head ${short(v.head_hash, 8) || "empty"}` : v.problem) : "checking…"}
             />
           </>
         )}

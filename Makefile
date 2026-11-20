@@ -14,7 +14,7 @@ help:
 	@echo "make down            stop it (make clean also deletes the volumes)"
 	@echo "make test            Go tests, agent tests, dashboard type-check and build"
 	@echo "make bypass-test     prove the agent has no route around the broker (run before every demo)"
-	@echo "make replay          run scenarios S1-S8, T1, T2 through the scripted agent and check each decision"
+	@echo "make replay          run HERO, S1-S4, S6-S10, T1, T2 through the scripted agent and check each decision"
 	@echo "make scoreboard      with/without PACT, scripted agent (ARGS=--quick for one phrasing each)"
 	@echo "make scoreboard-live with/without PACT, live Gemini agent (needs GEMINI_API_KEY)"
 	@echo "make verify          ask pact-core to walk the evidence chain"
@@ -89,9 +89,14 @@ scoreboard-supervisor:
 verify:
 	@python3 scripts/pact.py verify
 
+# Verifies inside the pact-core image, so the host needs no Go. The org key is
+# read from the running pact-core here; to check a bundle against a key you
+# already trust, run verify yourself with the key you recorded earlier.
 export:
 	@curl -fsS $(API)/v1/evidence/export -o pact-evidence.json
-	@go run ./cmd/pact-core verify pact-evidence.json
+	@ORG=$$(curl -fsS $(API)/v1/keys | python3 -c 'import json,sys; print(json.load(sys.stdin)["org"])') && \
+	  $(COMPOSE) run --rm --no-deps -T -v "$(CURDIR)/pact-evidence.json:/pact-evidence.json:ro" pact-core \
+	  verify -org-pubkey "$$ORG" /pact-evidence.json
 
 tamper:
 	@sh scripts/tamper.sh $(SEQ)

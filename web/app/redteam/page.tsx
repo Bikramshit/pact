@@ -4,7 +4,7 @@ import { ArrowRight, Bug, FileWarning, Info, ListChecks, Play, Sparkles } from "
 import Link from "next/link";
 import { useState } from "react";
 import { EFFECTS, MODES, MODE_ORDER, Outcome, latency, modelsUsed } from "@/components/Score";
-import { UseOwnKeyButton } from "@/components/ModelKeyDialog";
+import { UseOwnKeyButton, billedTo, brokenServerKey } from "@/components/ModelKeyDialog";
 import { Card, CardHeader, Empty, PageHeader, Segmented, Spinner, StatusBadge } from "@/components/ui";
 import { api, clock, usePoll } from "@/lib/api";
 import { useLive, useLiveEvent } from "@/lib/live";
@@ -114,6 +114,9 @@ export default function RedteamPage() {
   const run = data?.run ?? null;
   const running = run?.status === "running";
   const canRun = !!status?.gemini_configured;
+  // Live controls stay enabled while the server key looks broken (its status is
+  // only refreshed by using it), but the prompt to add your own key shows.
+  const keyTrouble = !canRun || (status?.llm?.source === "server" && brokenServerKey(status.llm.server));
   const modes: Mode[] = run ? MODE_ORDER.filter((m) => (run.modes ?? []).includes(m)) : supervisor ? MODE_ORDER : ["off", "on"];
   const result = (m: Mode) => run?.results.find((r) => r.mode === m);
   const current = running ? modes[run!.results.length] : undefined;
@@ -182,7 +185,7 @@ export default function RedteamPage() {
               {running || starting ? <Spinner /> : <Play className="size-4" />}
               {running ? `Running ${run!.done + 1} of ${run!.total}…` : "Run the attack"}
             </button>
-            {!canRun && (
+            {keyTrouble && (
               <div className="flex items-start gap-2 text-[12.5px] text-muted">
                 <Info className="mt-0.5 size-3.5 shrink-0" />
                 <span>
@@ -235,7 +238,7 @@ export default function RedteamPage() {
                   <p className="text-ink-2">
                     Effects checked on the targets: {EFFECTS.map((e) => e.label.toLowerCase()).join(", ")}. Agent: live {run.model}.
                     {used && <> Model calls answered by: <span className="code">{used}</span>.</>}
-                    {run.key_source && <> Billed to {run.key_source}.</>}
+                    {run.key_source && <> Billed to {billedTo(run.key_source)}.</>}
                   </p>
                 </div>
               </Card>

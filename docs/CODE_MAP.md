@@ -19,6 +19,8 @@ pact/
 │   ├── netguard/             refuses connections arriving on the wrong network
 │   ├── scoreboard/           scenario runner, oracles, three-way comparison, red-team runs
 │   ├── api/                  control-plane handlers, live event stream, static dashboard
+│   ├── userkeys/             judges' own Gemini keys, sealed in memory, one per browser
+│   ├── events/               the hub that fans events out to the live stream
 │   ├── store/                PostgreSQL store (and in-memory for tests)
 │   ├── scenario/             loads the seed scenarios
 │   ├── workspace/            the broker-side copy of the repository the agent edits
@@ -30,8 +32,9 @@ pact/
 ├── web/                      dashboard: Next.js static export, served by pact-core
 ├── demo/
 │   ├── web-app/              the sample application (with a seeded bug and a poisoned README)
-│   └── scenarios/            S1–S10, HERO, T1, T2 and the README variants
+│   └── scenarios/            HERO, S1–S4, S6–S10, T1, T2 and the README variants (S5 is `make bypass-test`)
 ├── deploy/                   Docker Compose: default, offline stand-in model, Cloud KMS
+│   └── gcp/                  one-VM deployment on Google Cloud, behind Caddy
 ├── scripts/                  bypass test, tamper and truncate, CLI driver
 └── docs/                     these documents
 ```
@@ -47,7 +50,7 @@ Read them in this order to follow one tool call from start to finish.
 | [`internal/policy/policy.rego`](../internal/policy/policy.rego) | The decision chain in 90 lines: deny, gate, approval, allow |
 | [`internal/policy/native.go`](../internal/policy/native.go) | The same chain in Go, tested to match |
 | [`internal/contract/contract.go`](../internal/contract/contract.go) | The contract, its validator, signing and verification |
-| [`internal/contract/draft.go`](../internal/contract/draft.go) | How Gemini drafts a contract and why it cannot weaken it |
+| [`internal/contract/draft.go`](../internal/contract/draft.go) | How Gemini drafts a contract and why it cannot loosen the trust labels (`template.go` applies them) |
 | [`internal/capability/capability.go`](../internal/capability/capability.go) | Capability tokens |
 | [`internal/evidence/evidence.go`](../internal/evidence/evidence.go) | Appending, hashing, chaining, the checkpoint, verification |
 | [`deploy/docker-compose.yml`](../deploy/docker-compose.yml) | The four networks: the trust boundary |
@@ -79,12 +82,15 @@ make bypass-test       # network isolation, against the running stack
 | Test file | What it proves |
 | --- | --- |
 | `internal/scoreboard/scenarios_test.go` | Every seed scenario gets its expected decisions with PACT on (both policy engines). The same attacks land with PACT off. The AI-supervisor baseline runs. Reviewer outages are excluded. |
-| `internal/broker/broker_test.go` | Denied calls never reach targets. Labels cannot be spoofed. Paths cannot escape. Every protocol violation is denied. No unlogged actions. Taint holds, approve, reject, timeout. The exfiltration gate. The model proxy's limits. Capabilities are bound to their agent. |
+| `internal/broker/broker_test.go` | Denied calls never reach targets. Labels cannot be spoofed. Paths cannot escape. Every protocol violation is denied, including a request replayed under another capability. No unlogged actions. Taint holds, approve, reject, timeout, and no execution after revocation. The exfiltration gate. The model proxy's limits. Capabilities are bound to their agent. |
 | `internal/api/api_test.go` | The whole demo through the HTTP API. Gemini drafting is advisory (bad drafts are replaced, risky grants flagged). Red-team input validation. |
+| `internal/api/userkeys_test.go` | Judges' own keys end to end: cross-site writes refused, keys per browser, no fallback, a leak scan of every store and log, rate limits, session fixation, unknown host names refused |
+| `internal/userkeys/vault_test.go` | The key vault: sealing, redaction, expiry, replacement, limits |
 | `internal/policy/policy_test.go` | The decision table, glob semantics, determinism, and OPA and native agreement on 1,088 inputs |
-| `internal/evidence/evidence_test.go` | Edits, added fields, deletions and wrong keys are all located |
+| `internal/evidence/evidence_test.go` | Edits, added fields, appended text, deletions and wrong keys are all located; nothing is appended over a deletion; concurrent appends keep the checkpoint right |
+| `internal/canon/canon_test.go` | Canonical JSON is deterministic and refuses trailing data |
 | `internal/capability/capability_test.go` | Flipping any byte of a token fails verification |
-| `internal/contract/contract_test.go` | Changing any field breaks the signature; the validator rejects unknown resources |
+| `internal/contract/contract_test.go` | Changing any field breaks the signature; the validator rejects unknown resources; drafts and edits cannot loosen the organisation's trust labels |
 | `internal/keys/keys_test.go` | Cloud KMS signing against a fake KMS; the evidence-key certificate |
 | `internal/broker/executors/executors_test.go` | Model retry, fallback, cooldown and rate-limit handling |
 | `internal/netguard/netguard_test.go` | Which networks each port accepts |

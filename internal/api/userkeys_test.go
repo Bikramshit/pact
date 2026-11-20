@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log"
 	"net/http"
@@ -317,13 +318,75 @@ func TestKeyChecksAreRateLimited(t *testing.T) {
 	if code, _ := h.do("POST", "/v1/session/key", map[string]any{"key": badKey}); code != 429 {
 		t.Fatalf("sixth check from the same browser: %d", code)
 	}
-	// A client that drops its cookie every time still hits the global cap.
-	for i := 0; i < 30; i++ {
-		if code, _ := h.browser().do("POST", "/v1/session/key", map[string]any{"key": badKey}); code == 429 {
+	// A client that drops its cookie every time is limited by its address...
+	limited := false
+	for i := 0; i < 10 && !limited; i++ {
+		code, _ := h.browser().do("POST", "/v1/session/key", map[string]any{"key": badKey})
+		limited = code == 429
+	}
+	if !limited {
+		t.Fatal("cookie-dropping clients from one address were never rate-limited")
+	}
+	// ...and many addresses together hit the global cap.
+	for i := 0; i < 40; i++ {
+		resp, _ := h.browser().raw("POST", "/v1/session/key", map[string]any{"key": badKey},
+			map[string]string{api.ClientHeader: "x", "X-Forwarded-For": fmt.Sprintf("10.0.%d.1", i)})
+		if resp.StatusCode == 429 {
 			return
 		}
 	}
-	t.Fatal("cookie-dropping clients were never rate-limited")
+	t.Fatal("clients spread over many addresses were never rate-limited")
+}
+
+// DNS rebinding: a page whose own name now resolves to this server sends that
+// name as the Host. It is refused; the deployment's names are not.
+func TestUnknownHostsAreRefused(t *testing.T) {
+	h, _ := keyHarness(t, true, true)
+	for host, want := range map[string]int{
+		"attacker.example:8080": 421,
+		"localhost:8080":        200,
+		"127.0.0.1:8080":        200,
+		"34-1-2-3.sslip.io":     200,
+	} {
+		req, _ := http.NewRequest("GET", h.url+"/v1/status", nil)
+		req.Host = host
+		resp, err := h.client.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		if resp.StatusCode != want {
+			t.Errorf("Host %s: got %d, want %d", host, resp.StatusCode, want)
+		}
+	}
+}
+
+// Session fixation: a session id the browser arrives with (planted by another
+// site, say) never ends up holding the key.
+func TestKeyGoesUnderAFreshSession(t *testing.T) {
+	judge, _ := keyHarness(t, true, true)
+	u, _ := url.Parse(judge.url)
+	planted := strings.Repeat("A", 43)
+	judge.client.Jar.SetCookies(u, []*http.Cookie{{Name: "pact_sid", Value: planted, Path: "/"}})
+	if code, body := judge.do("POST", "/v1/session/key", map[string]any{"key": judgeKey}); code != 200 {
+		t.Fatalf("save: %d %v", code, body)
+	}
+	if judge.sid() == planted || judge.sid() == "" {
+		t.Fatalf("the key was stored under the planted session id")
+	}
+	attacker := judge.browser()
+	attacker.client.Jar.SetCookies(u, []*http.Cookie{{Name: "pact_sid", Value: planted, Path: "/"}})
+	if _, body := attacker.do("GET", "/v1/session/key", nil); body["key"] != nil {
+		t.Fatalf("the planted session id sees the judge's key: %v", body)
+	}
+
+	// Over HTTPS the cookie carries the __Host- prefix and the Secure flag.
+	resp, _ := judge.browser().raw("POST", "/v1/session/key", map[string]any{"key": judgeKey},
+		map[string]string{api.ClientHeader: "x", "X-Forwarded-Proto": "https", "X-Forwarded-For": "10.9.9.9"})
+	set := resp.Header.Values("Set-Cookie")
+	if resp.StatusCode != 200 || len(set) == 0 || !strings.HasPrefix(set[len(set)-1], "__Host-pact_sid=") || !strings.Contains(set[len(set)-1], "Secure") {
+		t.Fatalf("cookie over HTTPS: %d %v", resp.StatusCode, set)
+	}
 }
 
 func TestUserKeysCanBeTurnedOff(t *testing.T) {
@@ -357,4 +420,12 @@ func TestLiveFeaturesFollowTheBrowsersKey(t *testing.T) {
 	if code != 202 || out["run"].(map[string]any)["key_source"] != "your key" {
 		t.Fatalf("red-team run with the judge's key: %d %v", code, out)
 	}
+	// Let the run finish before the test's directories are removed.
+	for i := 0; i < 300; i++ {
+		if run, ok := judge.s.Runner.LatestRedteam(); ok && run.Status != "running" {
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatal("the red-team run did not finish")
 }

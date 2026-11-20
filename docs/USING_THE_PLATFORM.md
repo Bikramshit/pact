@@ -4,7 +4,7 @@ How to start PACT, what each dashboard page does, and the commands behind them.
 
 ## Start it
 
-You need Docker Desktop, running. Go, Node and Python are only needed to change the code.
+You need Docker Desktop, running, plus `make`, `curl` and `python3` (macOS and Linux have them). Go, Node and pnpm are only needed to change the code.
 
 ```sh
 git clone https://github.com/Bikramshit/pact.git && cd pact
@@ -36,13 +36,13 @@ The live features (Gemini drafting, the live agent, Break it, the AI supervisor)
 
 How the key is protected:
 
-- It is sent over HTTPS to the control plane only, behind the dashboard password.
+- It is sent to the control plane only: over HTTPS on the deployed VM (behind the dashboard password, unless the operator chose `PACT_PUBLIC=1`), or to `127.0.0.1` on a laptop.
 - It is held encrypted (AES-256-GCM) in pact-core's memory only. It is never written to disk, the database, logs, the evidence chain or the live event stream.
 - It never reaches the agent. The agent's model calls go through the broker, which adds the key; capability records store only a random handle.
 - It is never shown again, only its last 4 characters.
-- It is tied to your browser by an `HttpOnly`, `SameSite=Strict` cookie. Another browser, or another website, cannot use it.
+- It is tied to your browser by an `HttpOnly`, `SameSite=Strict` cookie (named `__Host-pact_sid` over HTTPS), issued fresh when the key is saved. Another browser, or another website, cannot use it.
 - It is deleted after 2 hours unused (12 hours at most), when you remove it, or when the server restarts.
-- A browser can check at most 5 keys per 10 minutes.
+- A browser can check at most 5 keys per 10 minutes (10 from one network address, 30 across everyone).
 
 Whoever runs the server could still read its memory, as with any service you give a key to. Use a key you can revoke, and delete it in Google AI Studio after the demo. The operator can turn the feature off with `PACT_USER_KEYS=off`.
 
@@ -66,7 +66,7 @@ The guided demo, in four steps.
    - `S1` to `S10` are the benchmark scenarios.
    - Attack scenarios offer several phrasings of the injected text.
 
-   Choose *Scripted* (fixed tool calls) or *Live* (Gemini decides). Then press *Mint capability and start*. The repository and targets are reset first.
+   Choose *Scripted* (fixed tool calls) or *Live* (Gemini decides). Then press *Mint capability and start*. The repository and targets are reset first, so this is refused while a scoreboard, replay or Break it run is using them. *Run again* starts a fresh run with a new capability.
 4. **Check the evidence.** When the agent finishes, the summary shows allowed, blocked and held counts, whether anything reached a target, and a link to the evidence for this task.
 
 While the agent works, the right-hand side updates live:
@@ -84,7 +84,7 @@ When an action is held, a dialog opens on whichever page is showing. It shows:
 - the untrusted text the agent read, scrolled to the lines that mention the held action, or the confidential resource it read
 - a countdown: after 120 seconds the action is rejected
 
-Press **Reject** or **Approve and execute**. The approver's name and decision go into the evidence chain. *Decide later* (or Esc) shrinks the dialog to a pulsing pill at the bottom of the screen.
+Press **Reject** or **Approve and execute**. The approver's name and decision go into the evidence chain. *Decide later* (or Esc) shrinks the dialog to a pulsing pill at the bottom of the screen. If several actions are held, the oldest is shown first, and the one on screen stays there until it is decided, so a new hold never replaces the one you are reading.
 
 ## Evidence
 
@@ -103,6 +103,8 @@ make untamper    # puts everything back
 make verify      # asks pact-core to walk the chain
 ```
 
+After `make truncate`, `pact-core` refuses to record anything new until `make untamper` puts the record back. Otherwise the next decision would take the deleted record's number and hide the gap. Meanwhile every tool call fails closed, so run the truncation demo with no agent task in progress.
+
 ## Scoreboard
 
 The same attacks against the same agent under different protections.
@@ -119,6 +121,8 @@ Each configuration gets a column with:
 - added time per call
 
 Below the columns, results are broken down by attack type, followed by every scenario in every configuration. Hover an effect to see the oracle check behind it. For the AI supervisor, the reviewer's stated reason for each block is shown. Earlier runs stay available in the run dropdown.
+
+A run that failed before any effect was seen (the reviewing model or the agent errored, or it timed out) is left out of the figures and counted as excluded. While a run is going it owns the repository, the targets and the agent: resets and new tasks are refused until it finishes, and a run does not start while a task from *Run a task* is still running.
 
 ## Break it
 
@@ -141,12 +145,12 @@ These pages, rendered inside the platform. The same files are in [`docs/`](https
 | `make up-offline` | Start with the scripted stand-in model |
 | `make up-kms` | Start with signing keys in Cloud KMS |
 | `make test` | Go tests, agent tests, dashboard type-check and build |
-| `make bypass-test` | Prove the agent and test runner can reach nothing but the broker |
+| `make bypass-test` | Prove the agent and test runner can reach nothing but the broker (it resets the demo first) |
 | `make replay [ARGS="S6 T1"]` | Run scripted scenarios and check every decision and every target |
 | `make scoreboard [ARGS=--quick]` | Scripted agent, with and without PACT |
 | `make scoreboard-live [ARGS=--quick]` | Live Gemini agent, with and without PACT |
 | `make scoreboard-supervisor [ARGS=--quick]` | Scripted attacks: unprotected, AI supervisor, PACT |
-| `make verify` / `make export` | Verify the chain; download it and verify offline |
+| `make verify` / `make export` | Verify the chain; download it to `pact-evidence.json` and verify it offline inside the pact-core image, pinned to the org key |
 | `make tamper` / `make truncate` / `make untamper` | Edit a record / delete the newest / restore |
 | `make reset` | Restore the repository and clear the targets |
 | `make web-dev` | Dashboard dev server on port 3000, using a running stack |
@@ -160,5 +164,8 @@ These pages, rendered inside the platform. The same files are in [`docs/`](https
 | "No agent" | `docker compose logs agent`; it registers within seconds of the broker starting |
 | Draft with Gemini is slow or falls back to the pre-written contract | The model is overloaded or out of quota; the warning says which. Add your own key, or use the pre-written contract and the scripted agent. |
 | "Refused: state-changing requests must come from the PACT dashboard" | A script called the control plane without the `X-PACT-Client` header. Add it (any value), as `scripts/pact.py` does. |
+| Every tool call fails with "evidence log unavailable" | The chain is behind its signed checkpoint (after `make truncate`). Run `make untamper` |
+| "421 Misdirected Request", or "this server does not answer to the host name" | You opened the dashboard under a name pact-core does not know. Use `127.0.0.1`, or add the name to `PACT_ALLOWED_HOSTS` in `.env` and run `make up` |
+| "a scoreboard, replay or Break it run is in progress" | Wait for that run to finish; resets and new tasks are refused meanwhile |
 | pact-core cannot reach the database after you changed `POSTGRES_PASSWORD` | The password is only applied when the volume is first created; see the README |
 | Evidence is red before you tampered with anything | `make untamper`; if still red, `make clean && make up` (this deletes the evidence) |

@@ -106,3 +106,39 @@ func TestApplyDefaultsKeepsBaselineDenies(t *testing.T) {
 		t.Errorf("trust labels not applied: %+v", c)
 	}
 }
+
+// A drafted taint_tolerant list could only switch the gates off, so the
+// organisation's list replaces it.
+func TestDraftCannotExemptActionsFromTheGates(t *testing.T) {
+	d := DefaultsFor("web-app")
+	c := Contract{Instruction: "x", Allow: []Grant{{Resource: "repo:web-app/**", Ops: []string{"read", "write"}}},
+		TaintTolerant: []string{"net:**:*", "repo:web-app/deploy/**:write"}}
+	ApplyDefaults(&c, d, time.Now())
+	if len(c.TaintTolerant) != 1 || c.TaintTolerant[0] != "deploy:web-app:deploy" {
+		t.Fatalf("model-drafted exemptions survived: %v", c.TaintTolerant)
+	}
+}
+
+// A person editing the contract before signing can tighten the labels, not loosen them.
+func TestEditsKeepTheOrganisationsLabels(t *testing.T) {
+	d := DefaultsFor("web-app")
+	c := Template("x", d, time.Now())
+	c.Untrusted = []string{"repo:web-app/docs/**"}
+	c.Sensitive = nil
+	c.Confidential = nil
+	c.TaintTolerant = []string{"net:**:*", "deploy:web-app:deploy"}
+	c.Delegation.Allowed = true
+	c.OnTaint = "allow"
+	KeepOrgLabels(&c, d)
+	for _, want := range append(append(d.Untrusted, d.Sensitive...), d.Confidential...) {
+		if !contains(c.Untrusted, want) && !contains(c.Sensitive, want) && !contains(c.Confidential, want) {
+			t.Errorf("organisation label %s was removed", want)
+		}
+	}
+	if !contains(c.Untrusted, "repo:web-app/docs/**") {
+		t.Error("the signer's own addition was dropped")
+	}
+	if len(c.TaintTolerant) != 1 || c.TaintTolerant[0] != "deploy:web-app:deploy" || c.Delegation.Allowed || c.OnTaint != "hold" {
+		t.Fatalf("labels after an edit: tolerant=%v delegation=%v on_taint=%s", c.TaintTolerant, c.Delegation.Allowed, c.OnTaint)
+	}
+}

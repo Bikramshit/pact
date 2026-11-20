@@ -53,7 +53,32 @@ func (q *HoldQueue) open(h *Hold) Hold {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 	q.holds[h.ID] = h
+	q.pruneLocked()
 	return q.copyLocked(h.ID)
+}
+
+// keepResolved is how many resolved holds stay listed. Each can carry a whole
+// proposed file, so they cannot be kept forever.
+const keepResolved = 100
+
+func (q *HoldQueue) pruneLocked() {
+	var resolved []*Hold
+	for _, h := range q.holds {
+		if h.Status != "pending" {
+			resolved = append(resolved, h)
+		}
+	}
+	if len(resolved) <= keepResolved {
+		return
+	}
+	sort.Slice(resolved, func(i, j int) bool { return resolved[i].ResolvedAt < resolved[j].ResolvedAt })
+	// Never drop a hold whose request may still be finishing.
+	recent := time.Now().UTC().Add(-5 * time.Minute).Format(time.RFC3339)
+	for _, h := range resolved[:len(resolved)-keepResolved] {
+		if h.ResolvedAt < recent {
+			delete(q.holds, h.ID)
+		}
+	}
 }
 
 // get returns a copy of a hold's current state.
@@ -64,7 +89,11 @@ func (q *HoldQueue) get(id string) Hold {
 }
 
 func (q *HoldQueue) copyLocked(id string) Hold {
-	cp := *q.holds[id]
+	h, ok := q.holds[id]
+	if !ok {
+		return Hold{ID: id}
+	}
+	cp := *h
 	cp.ch = nil
 	return cp
 }

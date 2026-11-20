@@ -169,6 +169,16 @@ func TestProtocolViolationsAreDenied(t *testing.T) {
 			t.Fatalf("got %d %v", status, out)
 		}
 	})
+	t.Run("request replayed under another capability", func(t *testing.T) {
+		_, other := s.Session(t, broker.MintOptions{})
+		if status, _ := call(t, s, cap.Token, "read_file", map[string]any{"path": "README.md"}); status != 200 {
+			t.Fatalf("first request should pass, got %d", status)
+		}
+		status, out, _ := s.Agent.Call(ctx, other.Token, "read_file", map[string]any{"path": "README.md"}, "reuse_nonce")
+		if status != 403 || !strings.Contains(reasons(out), "nonce_reused") {
+			t.Fatalf("a captured request was accepted under another capability: %d %v", status, out)
+		}
+	})
 	t.Run("revoked capability", func(t *testing.T) {
 		_, c2 := s.Session(t, broker.MintOptions{})
 		if err := s.Broker.RevokeCapability(ctx, c2.CapID); err != nil {
@@ -277,6 +287,35 @@ func TestTaintGatedHold(t *testing.T) {
 		}
 	})
 
+	t.Run("approval after revocation does not execute", func(t *testing.T) {
+		s := testkit.New(t, testkit.Options{})
+		_, cap := s.Session(t, broker.MintOptions{})
+		before := s.WS.FileHash("deploy/pipeline.yaml")
+		call(t, s, cap.Token, "read_file", map[string]any{"path": depsReadme})
+		go func() {
+			for i := 0; i < 200; i++ {
+				for _, h := range s.Broker.Holds.List() {
+					if h.Status == "pending" {
+						_ = s.Broker.RevokeCapability(ctx, cap.CapID)
+						_ = s.Broker.Holds.Resolve(h.ID, "approved", "judge")
+						return
+					}
+				}
+				time.Sleep(10 * time.Millisecond)
+			}
+		}()
+		status, body := call(t, s, cap.Token, "write_file", pipeline)
+		if status != 403 || !strings.Contains(reasons(body), "capability_revoked") {
+			t.Fatalf("expected the approved hold to be refused, got %d %v", status, body)
+		}
+		if s.WS.FileHash("deploy/pipeline.yaml") != before {
+			t.Fatal("a write was executed after its capability was revoked")
+		}
+		if rec := lastRecord(t, s); rec.Outcome != "not_executed" || rec.Approval == nil || rec.Approval.Result != "approved" {
+			t.Fatalf("closing record: %+v", rec)
+		}
+	})
+
 	t.Run("approve executes the held write", func(t *testing.T) {
 		s := testkit.New(t, testkit.Options{})
 		_, cap := s.Session(t, broker.MintOptions{})
@@ -369,11 +408,20 @@ func TestLLMProxyOnlyForwardsTextAndFunctionDeclarations(t *testing.T) {
 		"unknown field":   `{"contents":[],"somethingNew":true}`,
 		"not an object":   `[1,2,3]`,
 		"empty":           ``,
+		"nested file uri": `{"contents":[{"role":"user","parts":[{"functionResponse":{"name":"x","response":{},"parts":[{"fileData":{"fileUri":"https://evil.example/?d=secret"}}]}}]}]}`,
+		"repeated key":    `{"tools":[{"urlContext":{}}],"tools":[]}`,
+		"trailing data":   `{"contents":[]} {"tools":[{"urlContext":{}}]}`,
+		"deep nesting":    `{"contents":` + strings.Repeat("[", 200) + strings.Repeat("]", 200) + `}`,
 	}
 	for name, body := range bad {
 		if err := broker.ValidateLLMRequest([]byte(body)); err == nil {
 			t.Errorf("%s: request was accepted", name)
 		}
+	}
+	// What is forwarded is re-encoded from what was checked, numbers intact.
+	norm, err := broker.NormalizeLLMRequest([]byte(`{"contents":[{"parts":[{"text":"a<b"}]}],"generationConfig":{"temperature":0.25,"seed":12345678901234567}}`))
+	if err != nil || !strings.Contains(string(norm), `"temperature":0.25`) || !strings.Contains(string(norm), `"seed":12345678901234567`) {
+		t.Fatalf("normalised request: %s %v", norm, err)
 	}
 }
 

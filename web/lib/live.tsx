@@ -30,9 +30,6 @@ export function LiveProvider({ children }: { children: React.ReactNode }) {
   const refreshStatus = status.refresh;
 
   useEffect(() => {
-    const es = new EventSource("/v1/decisions/stream");
-    es.onopen = () => setConnected(true);
-    es.onerror = () => setConnected(false);
     const onEvent = (e: MessageEvent) => {
       let ev: StreamEvent;
       try {
@@ -44,8 +41,34 @@ export function LiveProvider({ children }: { children: React.ReactNode }) {
       if (ev.type === "agent") refreshStatus();
       listeners.current.forEach((fn) => fn(ev));
     };
-    EVENT_TYPES.forEach((t) => es.addEventListener(t, onEvent as EventListener));
-    return () => es.close();
+    // The browser retries a dropped stream by itself, but gives up for good if a
+    // retry gets an error page (a proxy's 502 while pact-core restarts, say).
+    // Then open a new one, backing off up to 30 seconds.
+    let es: EventSource | null = null;
+    let retry: ReturnType<typeof setTimeout> | undefined;
+    let delay = 1000;
+    let stopped = false;
+    const open = () => {
+      es = new EventSource("/v1/decisions/stream");
+      es.onopen = () => {
+        setConnected(true);
+        delay = 1000;
+      };
+      es.onerror = () => {
+        setConnected(false);
+        if (stopped || !es || es.readyState !== EventSource.CLOSED) return;
+        es.close();
+        retry = setTimeout(open, delay);
+        delay = Math.min(delay * 2, 30000);
+      };
+      EVENT_TYPES.forEach((t) => es?.addEventListener(t, onEvent as EventListener));
+    };
+    open();
+    return () => {
+      stopped = true;
+      clearTimeout(retry);
+      es?.close();
+    };
   }, [refreshHolds, refreshStatus]);
 
   const subscribe = useCallback((fn: Listener) => {

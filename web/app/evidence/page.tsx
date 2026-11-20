@@ -254,8 +254,10 @@ function EvidenceView() {
       setError(null);
       // The whole chain is verified, but only part of it is listed. If the break
       // is outside the list, fetch the records around it so it can be shown.
+      // After a truncation the "bad" record is the first missing one, which
+      // cannot be fetched, so there is nothing to show around it.
       const listed = new Set(ev.records.map((r) => r.seq));
-      if (!v.ok && v.first_bad_seq > 0 && !listed.has(v.first_bad_seq)) {
+      if (!v.ok && !v.truncated && v.first_bad_seq > 0 && !listed.has(v.first_bad_seq)) {
         const win = await api<{ records: EvidenceRecord[] }>(`/v1/evidence?from_seq=${Math.max(1, v.first_bad_seq - 2)}&limit=6`);
         setAround(win.records);
       } else {
@@ -342,11 +344,17 @@ function EvidenceView() {
             {verify && !verify.ok && (
               <>
                 <p className="text-[18px] font-semibold">
-                  {verify.error ? "The chain could not be read" : verify.truncated ? "Records are missing from the end of the chain" : `Chain broken at record #${verify.first_bad_seq}`}
+                  {verify.error
+                    ? "The chain could not be read"
+                    : verify.truncated
+                      ? "Records are missing from the end of the chain"
+                      : verify.first_bad_seq > 0
+                        ? `Chain broken at record #${verify.first_bad_seq}`
+                        : "The chain's signed checkpoint does not verify"}
                 </p>
                 <p className="text-[13px] text-ink-2">
                   {verify.error ?? verify.problem}
-                  {!verify.error && !verify.truncated && ". Records from this point on cannot be trusted."}
+                  {!verify.error && !verify.truncated && verify.first_bad_seq > 0 && ". Records from this point on cannot be trusted."}
                 </p>
               </>
             )}

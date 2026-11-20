@@ -75,6 +75,11 @@ func (b *Broker) handleLLM(w http.ResponseWriter, r *http.Request) {
 		Request json.RawMessage `json:"request"`
 	}
 	_ = json.Unmarshal(raw, &body)
+	// Forward the re-encoded request that was checked. If it fails the check,
+	// keep it as sent: Derive refuses it and the refusal is recorded.
+	if norm, err := NormalizeLLMRequest(body.Request); err == nil {
+		body.Request = norm
+	}
 	status, resp := b.process(r, ToolLLMGenerate, map[string]any{"request": body.Request}, raw)
 	writeJSON(w, status, resp)
 }
@@ -176,7 +181,10 @@ func (b *Broker) process(r *http.Request, tool string, args map[string]any, raw 
 		checks["nonce_fresh"] = false
 		return deny("bad_nonce")
 	}
-	fresh, err := b.store.UseNonce(ctx, payload.CapID, nonce, now)
+	// Nonces are unique per agent key, not per capability: the signature does not
+	// cover the capability, so a captured request must not be replayable under
+	// another capability the same agent holds.
+	fresh, err := b.store.UseNonce(ctx, "key:"+payload.AgentPubkey, nonce, now)
 	checks["nonce_fresh"] = err == nil && fresh
 	if err != nil {
 		return deny("internal_error: nonce store unavailable")
@@ -263,11 +271,18 @@ type taintInfo struct {
 }
 
 // executeAndRecord runs an allowed action and writes its record. If the record
-// cannot be written the result is withheld: there are no unlogged actions.
+// cannot be written the result is withheld from the agent. The action itself
+// has already run by then, so a store failure leaves it recorded only in
+// pact-core's log; a request the agent abandons is still recorded.
 func (b *Broker) executeAndRecord(ctx context.Context, c contract.Contract, sess Session, er evidence.Record, req policy.Request, args map[string]any, start time.Time) (int, map[string]any) {
 	execStart := time.Now()
 	result, content, execErr := b.execute(ctx, &sess, req, args)
 	execDur := time.Since(execStart)
+
+	// From here on the action has happened (or was attempted): record it even if
+	// the agent has hung up, which would otherwise cancel the database writes.
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 15*time.Second)
+	defer cancel()
 
 	er.Outcome = "executed"
 	if execErr != nil {
@@ -281,6 +296,8 @@ func (b *Broker) executeAndRecord(ctx context.Context, c contract.Contract, sess
 		if len(excerpt) > excerptLimit {
 			excerpt = excerpt[:excerptLimit]
 		}
+		// PostgreSQL's JSONB cannot hold U+0000; the excerpt is for display only.
+		excerpt = strings.ReplaceAll(excerpt, "\x00", "")
 		taint = &taintInfo{sha256: hex.EncodeToString(sum[:]), excerpt: excerpt}
 		er.TaintAdded = &evidence.TaintSource{Resource: req.Resource, SHA256: taint.sha256}
 	}
@@ -297,7 +314,9 @@ func (b *Broker) executeAndRecord(ctx context.Context, c contract.Contract, sess
 	// Persist session changes before the agent sees any content.
 	if _, err := b.updateSession(ctx, sess.SessionID, func(s *Session) {
 		s.Calls++
-		if sess.LastTest != nil {
+		// Only the call that ran the tests changes the result; others carry a
+		// copy read when they started, which may be older than the stored one.
+		if req.Tool == ToolRunTests && sess.LastTest != nil {
 			s.LastTest = sess.LastTest
 		}
 		if taint != nil {
@@ -380,12 +399,42 @@ func (b *Broker) hold(ctx context.Context, rec CapabilityRecord, c contract.Cont
 		return http.StatusForbidden, map[string]any{"decision": "deny", "held": true, "decision_id": final.DecisionID, "hold_id": h.ID,
 			"reasons": append([]string{"hold_" + res.result}, reasons...)}
 	}
+	// The capability or contract may have been revoked or expired while the
+	// action waited. Approval does not override that.
+	if why := b.stillValid(ctx, rec.CapID, c); why != "" {
+		closing.Outcome = "not_executed"
+		closing.Reasons = append([]string{why}, reasons...)
+		final, err := b.evidence.Append(ctx, closing)
+		if err != nil {
+			return http.StatusInternalServerError, map[string]any{"error": "evidence log unavailable; request refused"}
+		}
+		b.addMetric(er.CapID, CallMetric{Tool: req.Tool, Decision: "deny", TotalMS: ms(time.Since(start))})
+		return http.StatusForbidden, map[string]any{"decision": "deny", "held": true, "decision_id": final.DecisionID, "hold_id": h.ID,
+			"reasons": closing.Reasons}
+	}
 	status, resp := b.executeAndRecord(ctx, c, sess, closing, req, args, start)
 	if status == http.StatusOK {
 		resp["held"] = true
 		resp["hold_id"] = h.ID
 	}
 	return status, resp
+}
+
+// stillValid re-reads a capability after a hold and returns why it can no
+// longer be used, or "" if it still can.
+func (b *Broker) stillValid(ctx context.Context, capID string, c contract.Contract) string {
+	rec, err := store.GetJSON[CapabilityRecord](ctx, b.store, store.KindCapability, capID)
+	switch {
+	case err != nil:
+		return "internal_error: capability lookup failed"
+	case rec.Revoked:
+		return "capability_revoked"
+	case !rec.Payload.ValidAt(b.now()):
+		return "capability_expired"
+	case c.Expired(b.now()):
+		return "contract_expired"
+	}
+	return ""
 }
 
 // displayArgs trims large values so a hold card or event stays small.
@@ -436,6 +485,12 @@ func (b *Broker) execute(ctx context.Context, sess *Session, req policy.Request,
 		tr, err := b.exec.RunTests(ctx)
 		if err != nil {
 			return nil, nil, err
+		}
+		// A pass only counts for the tree the tests actually ran on: if a write
+		// landed while they ran, the result says nothing about either version.
+		if after, err := b.ws.TreeHash(); err != nil || after != version {
+			tr.Passed = false
+			tr.Output += "\n[pact] the repository changed while the tests ran; this run does not count as a pass"
 		}
 		sess.LastTest = &TestState{Version: version, Passed: tr.Passed}
 		return map[string]any{"passed": tr.Passed, "exit_code": tr.ExitCode, "output": tr.Output}, nil, nil
@@ -532,7 +587,7 @@ func (b *Broker) passthrough(ctx context.Context, rec CapabilityRecord, claimed 
 	execStart := time.Now()
 	result, _, execErr := b.execute(ctx, &sess, req, args)
 	execDur := time.Since(execStart)
-	if sess.LastTest != nil && sess.SessionID != "" {
+	if req.Tool == ToolRunTests && sess.LastTest != nil && sess.SessionID != "" {
 		_, _ = b.updateSession(ctx, sess.SessionID, func(s *Session) { s.LastTest = sess.LastTest; s.Calls++ })
 	}
 	decision := "unchecked"

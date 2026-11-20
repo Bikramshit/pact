@@ -26,3 +26,17 @@ func TestFloatsRejected(t *testing.T) {
 		t.Fatal("expected non-integer numbers to be rejected")
 	}
 }
+
+func TestTrailingDataIsRejected(t *testing.T) {
+	for _, in := range []string{`{"a":1}}`, `{"a":1}]`, `{"a":1} {"b":2}`, `{"a":1}x`} {
+		if _, err := Parse([]byte(in)); err == nil {
+			t.Errorf("Parse accepted %q", in)
+		}
+		if _, err := Canonicalize([]byte(in)); err == nil {
+			t.Errorf("Canonicalize accepted %q", in)
+		}
+	}
+	if _, err := Parse([]byte(" {\"a\":1} \n")); err != nil {
+		t.Errorf("surrounding whitespace is fine: %v", err)
+	}
+}

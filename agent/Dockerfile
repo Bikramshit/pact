@@ -9,7 +9,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends curl && rm -rf 
 
 WORKDIR /agent
 COPY requirements.txt .
-RUN pip install -r requirements.txt && python -m compileall -q /usr/local/lib/python3.12/site-packages >/dev/null 2>&1 || true
+RUN pip install -r requirements.txt && (python -m compileall -q /usr/local/lib/python3.12/site-packages >/dev/null 2>&1 || true)
 COPY pact_agent ./pact_agent
 RUN python -m compileall -q pact_agent
 

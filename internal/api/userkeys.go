@@ -2,7 +2,9 @@ package api
 
 import (
 	"errors"
+	"net"
 	"net/http"
+	"os"
 	"strings"
 	"time"
 
@@ -20,11 +22,58 @@ import (
 const ClientHeader = "X-PACT-Client"
 
 // sessionCookie names the cookie that binds a judge's key to their browser.
-const sessionCookie = "pact_sid"
+// Over HTTPS it carries the __Host- prefix, which a browser accepts only from
+// this exact host, so a neighbouring site (another *.sslip.io name, say) cannot
+// plant one.
+func sessionCookie(r *http.Request) string {
+	if secureRequest(r) {
+		return "__Host-pact_sid"
+	}
+	return "pact_sid"
+}
+
+// allowedHost reports whether a request names this server. A page on another
+// site that rebinds its own DNS name to 127.0.0.1 becomes same-origin with the
+// control plane and could add any header; it still sends its own name as the
+// Host, which is refused here. Allowed: loopback names, IP literals, the
+// sslip.io and nip.io names (their DNS answer is fixed by the name, so it
+// cannot be rebound) and anything in PACT_ALLOWED_HOSTS.
+func allowedHost(hostport string, extra []string) bool {
+	host := hostport
+	if h, _, err := net.SplitHostPort(hostport); err == nil {
+		host = h
+	}
+	host = strings.ToLower(strings.Trim(host, "[]"))
+	if host == "localhost" || net.ParseIP(host) != nil ||
+		strings.HasSuffix(host, ".sslip.io") || strings.HasSuffix(host, ".nip.io") {
+		return true
+	}
+	for _, e := range extra {
+		if host == e {
+			return true
+		}
+	}
+	return false
+}
+
+func allowedHostsFromEnv() []string {
+	var out []string
+	for _, h := range strings.Split(os.Getenv("PACT_ALLOWED_HOSTS"), ",") {
+		if h = strings.ToLower(strings.TrimSpace(h)); h != "" {
+			out = append(out, h)
+		}
+	}
+	return out
+}
 
 // guard applies the request rules every control-plane response needs.
 func guard(next http.Handler) http.Handler {
+	extra := allowedHostsFromEnv()
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !allowedHost(r.Host, extra) {
+			fail(w, http.StatusMisdirectedRequest, errors.New("refused: this server does not answer to the host name "+r.Host+" (add it to PACT_ALLOWED_HOSTS)"))
+			return
+		}
 		h := w.Header()
 		h.Set("X-Content-Type-Options", "nosniff")
 		h.Set("Referrer-Policy", "no-referrer")
@@ -47,7 +96,7 @@ func safeMethod(m string) bool {
 
 // sessionID returns the browser's session id from its cookie, if it has a well-formed one.
 func sessionID(r *http.Request) string {
-	c, err := r.Cookie(sessionCookie)
+	c, err := r.Cookie(sessionCookie(r))
 	if err != nil || len(c.Value) != 43 || strings.Trim(c.Value, "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_") != "" {
 		return ""
 	}
@@ -62,11 +111,11 @@ func secureRequest(r *http.Request) bool {
 }
 
 func setSession(w http.ResponseWriter, r *http.Request, sid string) {
-	http.SetCookie(w, &http.Cookie{Name: sessionCookie, Value: sid, Path: "/", HttpOnly: true, SameSite: http.SameSiteStrictMode, Secure: secureRequest(r)})
+	http.SetCookie(w, &http.Cookie{Name: sessionCookie(r), Value: sid, Path: "/", HttpOnly: true, SameSite: http.SameSiteStrictMode, Secure: secureRequest(r)})
 }
 
 func clearSession(w http.ResponseWriter, r *http.Request) {
-	http.SetCookie(w, &http.Cookie{Name: sessionCookie, Value: "", Path: "/", MaxAge: -1, HttpOnly: true, SameSite: http.SameSiteStrictMode, Secure: secureRequest(r)})
+	http.SetCookie(w, &http.Cookie{Name: sessionCookie(r), Value: "", Path: "/", MaxAge: -1, HttpOnly: true, SameSite: http.SameSiteStrictMode, Secure: secureRequest(r)})
 }
 
 // keyRef is the handle of this browser's own key, or "" to use the server key.
@@ -154,6 +203,11 @@ func (s *Server) putUserKey(w http.ResponseWriter, r *http.Request) {
 		fail(w, 400, err)
 		return
 	}
+	// One client (by address) cannot use up the server-wide budget for everyone.
+	if !s.allowClientCheck(clientIP(r)) {
+		fail(w, 429, errors.New("too many key checks; wait a few minutes and try again"))
+		return
+	}
 	sid := sessionID(r)
 	if sid == "" {
 		sid = userkeys.NewSessionID()
@@ -174,12 +228,59 @@ func (s *Server) putUserKey(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 400, obj{"error": msg, "status": status})
 		return
 	}
-	info, err := s.UserKeys.Put(sid, key, model)
+	// The key goes under a fresh session id, never the one the browser sent: a
+	// session id planted by someone else must not end up holding this key.
+	fresh := userkeys.NewSessionID()
+	info, err := s.UserKeys.Put(fresh, key, model)
 	if err != nil {
 		fail(w, 400, errors.New(userkeys.Redact(err.Error(), key)))
 		return
 	}
+	s.UserKeys.Remove(sid) // a key this browser held before is replaced
+	setSession(w, r, fresh)
 	writeJSON(w, 200, obj{"key": info})
+}
+
+// clientIP is the address a request came from. Behind Caddy that is the
+// X-Forwarded-For value Caddy sets (it discards one sent by the client).
+func clientIP(r *http.Request) string {
+	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
+		parts := strings.Split(xff, ",")
+		return strings.TrimSpace(parts[len(parts)-1])
+	}
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		return r.RemoteAddr
+	}
+	return host
+}
+
+// allowClientCheck allows 10 key checks per client address per 10 minutes
+// (judges at one venue often share an address).
+func (s *Server) allowClientCheck(ip string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	now := time.Now()
+	if s.clientChecks == nil {
+		s.clientChecks = map[string][]time.Time{}
+	}
+	for k, ts := range s.clientChecks { // forget clients with nothing recent
+		if len(ts) == 0 || now.Sub(ts[len(ts)-1]) >= 10*time.Minute {
+			delete(s.clientChecks, k)
+		}
+	}
+	recent := []time.Time{}
+	for _, t := range s.clientChecks[ip] {
+		if now.Sub(t) < 10*time.Minute {
+			recent = append(recent, t)
+		}
+	}
+	if len(recent) >= 10 {
+		s.clientChecks[ip] = recent
+		return false
+	}
+	s.clientChecks[ip] = append(recent, now)
+	return true
 }
 
 func (s *Server) deleteUserKey(w http.ResponseWriter, r *http.Request) {

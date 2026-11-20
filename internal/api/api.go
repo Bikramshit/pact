@@ -15,6 +15,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/foxcolab/pact/internal/broker"
 	"github.com/foxcolab/pact/internal/broker/executors"
@@ -51,6 +52,8 @@ type Server struct {
 	mu     sync.Mutex
 	drafts map[string]contract.Draft
 	checks []time.Time // recent key checks across all browsers, for a global limit
+	// clientChecks are recent key checks per client address.
+	clientChecks map[string][]time.Time
 }
 
 // Handler returns the control-plane routes.
@@ -179,6 +182,10 @@ func (s *Server) draft(w http.ResponseWriter, r *http.Request) {
 		fail(w, 400, errors.New("instruction is required"))
 		return
 	}
+	if utf8.RuneCountInString(body.Instruction) > maxInstruction {
+		fail(w, 400, fmt.Errorf("instruction is limited to %d characters", maxInstruction))
+		return
+	}
 	var d contract.Draft
 	if body.Template {
 		t := contract.Template(strings.TrimSpace(body.Instruction), s.Compiler.Defaults, time.Now())
@@ -195,10 +202,20 @@ func (s *Server) draft(w http.ResponseWriter, r *http.Request) {
 	if s.drafts == nil {
 		s.drafts = map[string]contract.Draft{}
 	}
+	// A draft can only be signed before its contract expires; drop the rest.
+	now := time.Now()
+	for id, old := range s.drafts {
+		if old.Contract.Expired(now) {
+			delete(s.drafts, id)
+		}
+	}
 	s.drafts[d.Contract.ContractID] = d
 	s.mu.Unlock()
 	writeJSON(w, 200, d)
 }
+
+// maxInstruction bounds a task instruction; drafts are kept in memory until they expire.
+const maxInstruction = 4000
 
 func (s *Server) confirm(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
@@ -224,6 +241,8 @@ func (s *Server) confirm(w http.ResponseWriter, r *http.Request) {
 		// Identity and lifetime come from the server-side draft, never from the client.
 		edited.ContractID, edited.TaskID, edited.Version, edited.ExpiresAt = c.ContractID, c.TaskID, c.Version, c.ExpiresAt
 		edited.Instruction = c.Instruction
+		// The signer may tighten the trust labels, never loosen the organisation's.
+		contract.KeepOrgLabels(&edited, s.Compiler.Defaults)
 		c = edited
 	}
 	if body.AgentID == "" {
@@ -373,23 +392,36 @@ func (s *Server) startTask(w http.ResponseWriter, r *http.Request) {
 		fail(w, 409, errors.New("no working Gemini key: add your own key, or use the scripted agent"))
 		return
 	}
-	if body.Reset {
-		if err := s.Runner.Reset(r.Context(), overlay); err != nil {
-			fail(w, 500, err)
-			return
-		}
-	}
-	rec, err := s.Broker.MintCapability(r.Context(), c, broker.MintOptions{KeyRef: s.keyRef(r)})
-	if err != nil {
-		fail(w, 400, err)
+	if body.MaxSteps < 0 || body.MaxSteps > 100 {
+		fail(w, 400, errors.New("max_steps must be between 0 (the default) and 100"))
 		return
 	}
-	as := &broker.Assignment{TaskID: c.TaskID, AgentID: c.AgentID, CapID: rec.CapID, Capability: rec.Token, Kind: body.Kind,
-		Instruction: c.Instruction, MaxSteps: body.MaxSteps, Label: c.TaskID}
-	if body.Kind == "replay" {
-		as.Steps = sc.Replay
+	// Reset and hand-over happen together, and never while a scoreboard,
+	// replay or Break it run is measuring the same repository and targets.
+	var rec broker.CapabilityRecord
+	var as *broker.Assignment
+	err = s.Runner.Exclusive(func() error {
+		if body.Reset {
+			if err := s.Runner.Reset(r.Context(), overlay); err != nil {
+				return err
+			}
+		}
+		var err error
+		if rec, err = s.Broker.MintCapability(r.Context(), c, broker.MintOptions{KeyRef: s.keyRef(r)}); err != nil {
+			return badRequest{err}
+		}
+		as = &broker.Assignment{TaskID: c.TaskID, AgentID: c.AgentID, CapID: rec.CapID, Capability: rec.Token, Kind: body.Kind,
+			Instruction: c.Instruction, MaxSteps: body.MaxSteps, Label: c.TaskID}
+		if body.Kind == "replay" {
+			as.Steps = sc.Replay
+		}
+		s.Broker.Agents.Enqueue(as)
+		return nil
+	})
+	if err != nil {
+		fail(w, worldStatus(err), err)
+		return
 	}
-	s.Broker.Agents.Enqueue(as)
 	writeJSON(w, 200, obj{"task_id": c.TaskID, "cap_id": rec.CapID, "assignment_id": as.ID, "kind": body.Kind})
 }
 
@@ -624,8 +656,8 @@ func (s *Server) demoReset(w http.ResponseWriter, r *http.Request) {
 		}
 		overlay = v.Overlay
 	}
-	if err := s.Runner.Reset(r.Context(), overlay); err != nil {
-		fail(w, 500, err)
+	if err := s.Runner.Exclusive(func() error { return s.Runner.Reset(r.Context(), overlay) }); err != nil {
+		fail(w, worldStatus(err), err)
 		return
 	}
 	writeJSON(w, 200, obj{"ok": true, "scenario": body.Scenario})
@@ -649,20 +681,39 @@ func (s *Server) replay(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	ctx := context.WithoutCancel(r.Context())
-	results := []scoreboard.Result{}
+	opts := make([]scoreboard.Options, len(body.Scenarios))
+	for i, id := range body.Scenarios {
+		opts[i] = scoreboard.Options{Scenario: id, Mode: broker.ModeOn, AgentKind: "replay", AutoRejectHolds: true,
+			Timeout: 90 * time.Second, ConfirmedBy: "replay"}
+	}
+	results, errs, err := s.Runner.Batch(ctx, opts)
+	if err != nil {
+		fail(w, worldStatus(err), err)
+		return
+	}
 	allOK := true
-	for _, id := range body.Scenarios {
-		sc, found := scenario.Find(s.Scenarios, id)
-		res, err := s.Runner.RunScenario(ctx, scoreboard.Options{Scenario: id, Mode: broker.ModeOn, AgentKind: "replay", AutoRejectHolds: true,
-			Timeout: 90 * time.Second, ConfirmedBy: "replay"})
-		pass := err == nil && res.StepsOK && len(res.Unauthorized) == 0 && res.AgentStatus == "done" && (!found || res.Completed == sc.ExpectCompletion)
-		if !pass {
+	for i, res := range results {
+		sc, found := scenario.Find(s.Scenarios, body.Scenarios[i])
+		if errs[i] != nil || !res.StepsOK || len(res.Unauthorized) > 0 || res.AgentStatus != "done" || (found && res.Completed != sc.ExpectCompletion) {
 			allOK = false
 		}
-		results = append(results, res)
 	}
-	_ = s.Runner.Reset(ctx, nil)
 	writeJSON(w, 200, obj{"ok": allOK, "results": results})
+}
+
+// badRequest marks an error inside an exclusive section as the caller's fault.
+type badRequest struct{ error }
+
+// worldStatus maps errors from a reset or hand-over to a status code.
+func worldStatus(err error) int {
+	var bad badRequest
+	switch {
+	case errors.Is(err, scoreboard.ErrBusy):
+		return 409
+	case errors.As(err, &bad):
+		return 400
+	}
+	return 500
 }
 
 func (s *Server) startScoreboard(w http.ResponseWriter, r *http.Request) {
@@ -682,6 +733,10 @@ func (s *Server) startScoreboard(w http.ResponseWriter, r *http.Request) {
 	}
 	if body.Agent != "replay" && body.Agent != "live" {
 		fail(w, 400, errors.New("agent must be replay or live"))
+		return
+	}
+	if body.MaxSteps < 0 || body.MaxSteps > 100 || body.Timeout < 0 || body.Timeout > 1800 {
+		fail(w, 400, errors.New("max_steps must be 0 to 100 and timeout_seconds 0 to 1800 (0 means the default)"))
 		return
 	}
 	if body.Agent == "live" && !s.llmAvailable(r) {
@@ -757,7 +812,7 @@ func (s *Server) startRedteam(w http.ResponseWriter, r *http.Request) {
 		fail(w, 400, errors.New("injection is required: write the text you want the agent to find"))
 		return
 	}
-	if len(body.Injection) > 8000 {
+	if utf8.RuneCountInString(body.Injection) > 8000 {
 		fail(w, 400, errors.New("injection is limited to 8000 characters"))
 		return
 	}

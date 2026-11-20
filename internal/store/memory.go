@@ -70,7 +70,11 @@ func (m *Memory) UseNonce(_ context.Context, capID, nonce string, _ time.Time) (
 	return true, nil
 }
 
-func (m *Memory) AppendEvidence(_ context.Context, fn AppendFunc) (EvidenceRow, error) {
+func (m *Memory) AppendEvidence(ctx context.Context, fn AppendFunc) (EvidenceRow, error) {
+	// Like PostgreSQL, refuse a cancelled request, so tests see what production does.
+	if err := ctx.Err(); err != nil {
+		return EvidenceRow{}, err
+	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.FailAppend != nil {
@@ -112,14 +116,24 @@ func (m *Memory) TamperEvidence(seq int64, edit func(json string) string) {
 	}
 }
 
-// DropNewestEvidence deletes the newest n records, as an attacker hiding recent activity would.
-func (m *Memory) DropNewestEvidence(n int) {
+// DropNewestEvidence deletes the newest n records, as an attacker hiding
+// recent activity would, and returns them.
+func (m *Memory) DropNewestEvidence(n int) []EvidenceRow {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if n > len(m.evidence) {
 		n = len(m.evidence)
 	}
+	gone := append([]EvidenceRow(nil), m.evidence[len(m.evidence)-n:]...)
 	m.evidence = m.evidence[:len(m.evidence)-n]
+	return gone
+}
+
+// RestoreEvidence puts back rows removed by DropNewestEvidence, as `make untamper` does.
+func (m *Memory) RestoreEvidence(rows []EvidenceRow) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.evidence = append(m.evidence, rows...)
 }
 
 func (m *Memory) Close() {}

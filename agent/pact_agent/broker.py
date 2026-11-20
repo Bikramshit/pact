@@ -81,7 +81,9 @@ class Broker:
         return resp.json()
 
     def done(self, assignment_id: str, report: dict) -> None:
-        self.http.post(f"{self.base_url}/v1/agents/{self.agent_id}/assignments/{assignment_id}/done", json=report)
+        resp = self.http.post(f"{self.base_url}/v1/agents/{self.agent_id}/assignments/{assignment_id}/done", json=report)
+        if resp.status_code >= 400:  # e.g. the broker restarted and no longer knows the assignment
+            print(f"agent: report for {assignment_id} was refused: {resp.status_code} {resp.text[:200]}", flush=True)
 
     # --- protected calls ---
 

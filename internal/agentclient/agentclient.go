@@ -108,9 +108,13 @@ func (c *Client) signed(ctx context.Context, token, path string, body []byte) (i
 // Call makes one signed tool call. tamper may be "", "capability_scope" or "reuse_nonce".
 func (c *Client) Call(ctx context.Context, token, tool string, args map[string]any, tamper string) (int, map[string]any, error) {
 	if tamper == "reuse_nonce" && c.last != nil {
-		// Resend the previous signed request byte for byte.
+		// Resend the previous signed request byte for byte, optionally under
+		// another capability (the signature does not cover it).
 		req := c.last.Clone(ctx)
 		req.Body = io.NopCloser(bytes.NewReader(c.lastBody))
+		if token != "" {
+			req.Header.Set(broker.HeaderCapability, token)
+		}
 		return c.do(req)
 	}
 	if tamper == "capability_scope" {

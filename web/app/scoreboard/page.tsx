@@ -3,7 +3,7 @@
 import { CircleCheck, CirclePause, CircleX, Clock, FlaskConical, Info, Play, Sparkles, TriangleAlert } from "lucide-react";
 import { useState } from "react";
 import { ScoreArt } from "@/components/illustrations/Spots";
-import { UseOwnKeyButton } from "@/components/ModelKeyDialog";
+import { UseOwnKeyButton, billedTo, brokenServerKey } from "@/components/ModelKeyDialog";
 import { EFFECTS, MODES, MODE_ORDER, Outcome, latency, modelsUsed } from "@/components/Score";
 import { Card, CardHeader, Empty, PageHeader, Segmented, Skeleton, Spinner, StatusBadge } from "@/components/ui";
 import { api, dateTime, usePoll } from "@/lib/api";
@@ -85,7 +85,7 @@ function Column({ mode, s }: { mode: Mode; s?: ScoreSummary }) {
           {(s.excluded ?? 0) > 0 && (
             <p className="flex items-start gap-2 rounded-lg border border-warn/30 bg-warn-soft px-3 py-2 text-[12.5px]">
               <TriangleAlert className="mt-0.5 size-3.5 shrink-0 text-warn" />
-              {s.excluded} run(s) are left out of these figures: the reviewing model did not answer, and an outage is not a verdict.
+              {s.excluded} run(s) are left out of these figures: something failed (the reviewing model, the agent or a timeout) before any effect was seen, and an outage is not a verdict.
             </p>
           )}
           {s.errors - (s.excluded ?? 0) > 0 && (
@@ -126,6 +126,9 @@ export default function ScoreboardPage() {
   const run = data?.run ?? null;
   const running = latest.data?.run?.status === "running";
   const canLive = !!status?.gemini_configured;
+  // Live controls stay enabled while the server key looks broken (its status is
+  // only refreshed by using it), but the prompt to add your own key shows.
+  const keyTrouble = !canLive || (status?.llm?.source === "server" && brokenServerKey(status.llm.server));
   const describe = (r: RunInfo) =>
     `${dateTime(r.finished_at)} · ${r.agent_kind === "live" ? "live" : "scripted"} agent · ${r.modes.map((m) => MODES[m]?.short ?? m).join(" / ")} · ${r.scenarios} scenarios`;
   const modes: Mode[] = run ? MODE_ORDER.filter((m) => (run.modes ?? ["off", "on"]).includes(m)) : ["off", "on"];
@@ -199,7 +202,7 @@ export default function ScoreboardPage() {
             {running ? "Running…" : "Run again"}
           </button>
         </div>
-        {!canLive && (
+        {keyTrouble && (
           <p className="border-t border-line px-5 py-2.5 text-[12.5px] text-muted">
             The live agent and the AI-supervisor comparison need a working Gemini key. <UseOwnKeyButton className="text-[12.5px]" />
           </p>
@@ -232,7 +235,7 @@ export default function ScoreboardPage() {
               {used && (
                 <p className="mt-0.5 text-[12.5px] text-muted">
                   Model calls answered by: <span className="code text-ink-2">{used}</span>
-                  {run.key_source && <>, billed to {run.key_source}</>}
+                  {run.key_source && <>, billed to {billedTo(run.key_source)}</>}
                 </p>
               )}
               {run.status === "running" && (

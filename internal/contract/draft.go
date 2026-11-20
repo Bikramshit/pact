@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"strings"
 	"time"
 
@@ -157,7 +158,7 @@ attempts:
 		TaintTolerant: gd.TaintTolerant, ApprovalRequired: gd.ApprovalRequired}
 	ApplyDefaults(&cand, c.Defaults, now)
 
-	// Validate with a placeholder agent; the real one is bound at confirmation.
+	// No agent is bound yet; that happens at confirmation.
 	if err := c.Validator.Validate(&cand); err != nil {
 		return fallback("Gemini's draft was rejected by validation (" + err.Error() + "); showing the pre-written contract.")
 	}
@@ -170,6 +171,11 @@ attempts:
 		switch typ {
 		case "secret", "net", "iam", "infra":
 			d.Warnings = append(d.Warnings, fmt.Sprintf("This draft grants %s on %s. Confirm only if the task really needs it.", strings.Join(g.Ops, ", "), g.Resource))
+		}
+	}
+	for _, t := range gd.TaintTolerant {
+		if !contains(cand.TaintTolerant, t) {
+			d.Warnings = append(d.Warnings, fmt.Sprintf("Gemini proposed letting %s run after untrusted content is read. PACT keeps the organisation's list instead, because that exemption would switch the taint gate off for it.", t))
 		}
 	}
 	return d
@@ -216,6 +222,9 @@ func (c *Compiler) askGemini(ctx context.Context, apiKey, model, instruction str
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(&gd); err != nil {
 		return gd, fmt.Errorf("response did not match the contract schema: %w", err)
+	}
+	if _, err := dec.Token(); err != io.EOF {
+		return gd, errors.New("response did not match the contract schema: text after the JSON object")
 	}
 	return gd, nil
 }

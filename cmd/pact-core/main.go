@@ -59,11 +59,15 @@ func main() {
 // verifyCmd checks an exported evidence bundle without contacting pact-core.
 func verifyCmd(args []string) int {
 	fs := flag.NewFlagSet("verify", flag.ExitOnError)
-	pubkey := fs.String("pubkey", "", "evidence public key to verify against (default: the key named in the bundle)")
-	orgKey := fs.String("org-pubkey", "", "org public key: also check that it vouches for the evidence key")
+	pubkey := fs.String("pubkey", "", "evidence public key the records must be signed with (default: the key named in the bundle)")
+	orgKey := fs.String("org-pubkey", "", "org public key that must vouch for the evidence key that signed the bundle")
+	fs.Usage = func() {
+		fmt.Fprintln(os.Stderr, "usage: pact-core verify [-org-pubkey ed25519:...] [-pubkey ed25519:...] FILE")
+		fs.PrintDefaults()
+	}
 	_ = fs.Parse(args)
 	if fs.NArg() != 1 {
-		fmt.Fprintln(os.Stderr, "usage: pact-core verify [-pubkey ed25519:...] FILE")
+		fs.Usage()
 		return 2
 	}
 	raw, err := os.ReadFile(fs.Arg(0))
@@ -81,22 +85,31 @@ func verifyCmd(args []string) int {
 		fmt.Fprintln(os.Stderr, err)
 		return 2
 	}
-	out, _ := json.MarshalIndent(res, "", "  ")
-	fmt.Println(string(out))
-	if !res.OK {
-		return 1
-	}
-	if *orgKey != "" {
+	// The org check comes before any verdict is printed, so "ok" is never shown
+	// for a bundle whose signer the org key does not vouch for.
+	if res.OK && *orgKey != "" {
 		orgPub, err := keys.DecodePublic(*orgKey)
 		if err != nil {
 			fmt.Fprintln(os.Stderr, err)
 			return 2
 		}
 		if !keys.VerifyEvidenceCert(orgPub, res.PublicKey, ex.KeyCertificate) {
-			fmt.Fprintln(os.Stderr, "the org key does not vouch for the evidence key that signed this chain")
-			return 1
+			res.OK, res.Problem = false, "the org key does not vouch for the evidence key that signed this chain"
 		}
+	}
+	out, _ := json.MarshalIndent(res, "", "  ")
+	fmt.Println(string(out))
+	if !res.OK {
+		return 1
+	}
+	switch {
+	case *orgKey != "":
 		fmt.Println("evidence key certified by the given org key")
+	case *pubkey != "":
+		fmt.Println("signed by the given evidence key")
+	default:
+		fmt.Fprintln(os.Stderr, "warning: no key pinned. This shows the bundle is internally consistent, not who signed it.\n"+
+			"Pass -org-pubkey with the org key you trust (GET /v1/keys) to check that.")
 	}
 	return 0
 }
@@ -241,11 +254,14 @@ func serve() error {
 	if err != nil {
 		return err
 	}
-	controlLn, err := net.Listen("tcp", env("PACT_CONTROL_ADDR", ":8080"))
+	// IPv4 only: the network rules above are IPv4 ranges. Outside Docker the
+	// defaults keep both ports on this machine; compose listens on all of the
+	// container's interfaces and relies on netguard to keep them apart.
+	controlLn, err := net.Listen("tcp4", env("PACT_CONTROL_ADDR", "127.0.0.1:8080"))
 	if err != nil {
 		return err
 	}
-	brokerLn, err := net.Listen("tcp", env("PACT_BROKER_ADDR", ":9090"))
+	brokerLn, err := net.Listen("tcp4", env("PACT_BROKER_ADDR", "127.0.0.1:9090"))
 	if err != nil {
 		return err
 	}

@@ -111,14 +111,32 @@ function why(hold: Hold) {
 export function HoldCenter() {
   const { holds, refreshHolds } = useLive();
   const toast = useToast();
-  const pending = holds.filter((h) => h.status === "pending");
-  const hold = pending[0];
+  // Oldest first: the one closest to its timeout. The hold on screen stays on
+  // screen until it is resolved, so a new hold can never replace the one a
+  // judge is reading (and Approve can never act on a hold they did not see).
+  const pending = useMemo(
+    () =>
+      holds
+        .filter((h) => h.status === "pending")
+        .sort((a, b) => a.opened_at.localeCompare(b.opened_at) || a.hold_id.localeCompare(b.hold_id)),
+    [holds],
+  );
+  const [shownId, setShownId] = useState<string | null>(null);
+  const hold = pending.find((h) => h.hold_id === shownId) ?? pending[0];
   const [minimized, setMinimized] = useState<string | null>(null);
   const [by, setBy] = useState("judge");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const marks = useMemo(() => (hold ? needles(hold) : []), [hold]);
   const open = !!hold && minimized !== hold.hold_id;
+
+  useEffect(() => {
+    const id = hold?.hold_id ?? null;
+    if (id !== shownId) {
+      setShownId(id);
+      setError(null);
+    }
+  }, [hold?.hold_id, shownId]);
 
   useEffect(() => {
     try {
@@ -267,7 +285,7 @@ export function HoldCenter() {
             </button>
           </div>
         </div>
-        {pending.length > 1 && <p className="border-t border-line px-5 py-2 text-[12.5px] text-muted">{pending.length - 1} more held action(s) waiting after this one.</p>}
+        {pending.length > 1 && <p className="border-t border-line px-5 py-2 text-[12.5px] text-muted">{pending.length - 1} more held action(s) waiting. Each opens here when this one is decided.</p>}
       </div>
     </div>
   );

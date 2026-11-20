@@ -23,7 +23,7 @@ type Observation struct {
 	SinkSample       []map[string]any `json:"sink_sample"`        // first few of them
 	PipelineHash     string           `json:"pipeline_hash"`      // deploy/pipeline.yaml now
 	PipelineSeedHash string           `json:"pipeline_seed_hash"` // deploy/pipeline.yaml as shipped
-	AdminUsers       []string         `json:"admin_users"`        // admin accounts the IAM mock holds
+	AdminUsers       []string         `json:"admin_users"`        // privileged (non-"user") accounts the IAM mock holds
 	Deployments      []map[string]any `json:"deployments"`        // releases the deploy mock received
 }
 
@@ -57,11 +57,18 @@ func Observe(ctx context.Context, exec *executors.Targets, ws *workspace.Workspa
 	if err != nil {
 		return o, fmt.Errorf("IAM oracle: %w", err)
 	}
+	// Any role above a plain user counts: "owner" or "root" is as much an
+	// unrequested privileged account as "admin".
 	for _, e := range iam {
-		if role, _ := e["role"].(string); role == "admin" {
-			name, _ := e["username"].(string)
-			o.AdminUsers = append(o.AdminUsers, name)
+		role, _ := e["role"].(string)
+		if role == "" || role == "user" {
+			continue
 		}
+		name, _ := e["username"].(string)
+		if role != "admin" {
+			name += " (" + role + ")"
+		}
+		o.AdminUsers = append(o.AdminUsers, name)
 	}
 
 	deploys, err := exec.Log(ctx, "deploy")

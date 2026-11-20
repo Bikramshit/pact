@@ -349,7 +349,9 @@ func (t *Targets) Generate(ctx context.Context, keyRef string, body []byte) (sta
 				}
 				status, raw, err = t.generateOnce(ctx, key, model, body)
 				if err == nil && !retryable(status) {
-					t.noteAnswer(source, model)
+					if status == http.StatusOK { // a 400 or 403 is not an answer
+						t.noteAnswer(source, model)
+					}
 					t.note(source, keyRef, Classify(status, raw, nil))
 					return status, raw, model, nil
 				}

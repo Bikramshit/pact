@@ -73,15 +73,16 @@ These run on every change:
 | Check | How |
 | --- | --- |
 | Every scripted step of S1 to S10, T1 and T2 gets its expected decision, and no unauthorised effect reaches a target | `make replay`; `internal/scoreboard/scenarios_test.go` runs the same scenarios against both policy engines |
-| The agent and test runner can reach nothing but the broker | `make bypass-test`: 14 direct connection attempts that must fail, plus a positive control |
+| The agent and test runner can reach nothing but the broker | `make bypass-test`: 21 direct connection attempts (including DNS lookups) that must fail for a "no route" reason, plus two positive controls |
 | A flipped byte in a capability fails verification | `internal/capability/capability_test.go` flips every byte |
 | Any edited contract field breaks its signature | `internal/contract/contract_test.go` |
-| An edited, added-to or deleted evidence record is located | `internal/evidence/evidence_test.go`; `make tamper`, `make truncate` |
+| An edited, added-to or deleted evidence record is located, and nothing can be appended over a deletion | `internal/evidence/evidence_test.go`; `make tamper`, `make truncate` |
 | OPA and the native engine agree | 1,088 inputs compared in `internal/policy/policy_test.go` |
 | No result is released without an evidence record | `internal/broker/broker_test.go` (fails the store and checks) |
-| The model proxy refuses web search, URL fetch, code execution and file URIs | `internal/broker/broker_test.go` |
+| The model proxy refuses web search, URL fetch, code execution and file URIs, including nested and duplicated ones | `internal/broker/broker_test.go` |
+| A request cannot be replayed under another capability, and an approval after revocation does not execute | `internal/broker/broker_test.go` |
 
-In total there are 53 Go test functions across 11 packages, plus agent signer tests and a dashboard type-check and build. All pass on `main`.
+In total there are 77 Go test functions across 12 packages, plus agent signer tests and a dashboard type-check and build. All pass, including under the race detector.
 
 ## What would make these numbers stronger
 

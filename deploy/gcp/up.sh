@@ -72,6 +72,13 @@ if [ -z "${PACT_HOST:-}" ]; then
     http://metadata.google.internal/computeMetadata/v1/instance/network-interfaces/0/access-configs/0/external-ip)
   PACT_HOST=$(echo "$IP" | tr . -).sslip.io
 fi
+# pact-core answers only to host names it knows (DNS-rebinding protection);
+# sslip.io names are known already, a domain of your own is added here.
+case "$PACT_HOST" in
+  "" | *[!A-Za-z0-9.-]*) echo "PACT_HOST must be a host name (letters, digits, dots and hyphens)"; exit 1 ;;
+  *.sslip.io | *.nip.io) ;;
+  *) set_env PACT_ALLOWED_HOSTS "$PACT_HOST" ;;
+esac
 DASH_USER=${PACT_DASH_USER:-judge}
 PASS=""
 AUTH=""

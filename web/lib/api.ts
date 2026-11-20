@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 export class ApiError extends Error {
   status: number;
@@ -40,15 +40,22 @@ export function usePoll<T>(path: string | null, intervalMs = 4000) {
   const [data, setData] = useState<T | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
+  // Only the newest request may set state: an older, slower response (for the
+  // previous path, say) must not overwrite a newer one.
+  const latest = useRef(0);
   const refresh = useCallback(async () => {
     if (!path) return;
+    const n = ++latest.current;
     try {
-      setData(await api<T>(path));
+      const got = await api<T>(path);
+      if (n !== latest.current) return;
+      setData(got);
       setError(null);
     } catch (e) {
+      if (n !== latest.current) return;
       setError((e as Error).message);
     } finally {
-      setLoading(false);
+      if (n === latest.current) setLoading(false);
     }
   }, [path]);
   useEffect(() => {

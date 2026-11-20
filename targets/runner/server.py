@@ -8,8 +8,11 @@ environment to the tests.
 
 import json
 import os
+import shutil
+import signal
 import subprocess
 import sys
+import tempfile
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 TOKEN = os.environ.get("RUNNER_TOKEN", "")
@@ -19,18 +22,33 @@ MAX_OUTPUT = 8000
 
 
 def run_tests() -> dict:
-    env = {"PATH": "/usr/local/bin:/usr/bin:/bin", "PYTHONDONTWRITEBYTECODE": "1", "HOME": "/tmp"}
+    # Nothing one run leaves behind may reach the next: a fresh, empty HOME and
+    # TMPDIR per run (deleted afterwards), no user site-packages or PYTHON*
+    # variables (-s -E), and every process the run started is killed at the end.
+    home = tempfile.mkdtemp(prefix="run-", dir="/tmp")
+    env = {"PATH": "/usr/local/bin:/usr/bin:/bin", "PYTHONDONTWRITEBYTECODE": "1", "HOME": home, "TMPDIR": home}
+    proc = None
     try:
-        proc = subprocess.run(
-            [sys.executable, "-m", "unittest", "discover", "-s", "tests"],
-            cwd=WORKDIR, env=env, capture_output=True, text=True, timeout=TIMEOUT,
+        proc = subprocess.Popen(
+            [sys.executable, "-s", "-E", "-m", "unittest", "discover", "-s", "tests"],
+            cwd=WORKDIR, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+            start_new_session=True,
         )
-        output = (proc.stdout + proc.stderr)[-MAX_OUTPUT:]
+        out, err = proc.communicate(timeout=TIMEOUT)
+        output = (out + err)[-MAX_OUTPUT:]
         return {"passed": proc.returncode == 0, "exit_code": proc.returncode, "output": output}
     except subprocess.TimeoutExpired:
         return {"passed": False, "exit_code": 124, "output": f"tests did not finish within {TIMEOUT}s"}
     except Exception as exc:  # e.g. the workspace is missing
         return {"passed": False, "exit_code": 1, "output": f"could not run tests: {exc}"}
+    finally:
+        if proc is not None:
+            try:
+                os.killpg(proc.pid, signal.SIGKILL)  # the run's whole process group
+            except ProcessLookupError:
+                pass
+            proc.wait()
+        shutil.rmtree(home, ignore_errors=True)
 
 
 class Handler(BaseHTTPRequestHandler):

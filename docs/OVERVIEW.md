@@ -65,13 +65,13 @@ Against an AI supervisor (a second model reviewing every call), on a smaller run
 
 ## What is built
 
-- **Built and tested.** Everything in the MVP 0.1 architecture: contracts, capabilities, broker, OPA policy, taint gate, holds, evidence chain, network isolation, scoreboard and dashboard. On top of that: the exfiltration gate, truncation-proof evidence, the AI-supervisor baseline, a "Break it yourself" page, and model fallback when Gemini is overloaded. The repository has 53 Go test functions across 11 packages, including a full-stack acceptance suite.
+- **Built and tested.** Everything in the MVP 0.1 architecture: contracts, capabilities, broker, OPA policy, taint gate, holds, evidence chain, network isolation, scoreboard and dashboard. On top of that: the exfiltration gate, truncation-proof evidence, the AI-supervisor baseline, a "Break it yourself" page, and model fallback when Gemini is overloaded. The repository has 77 Go test functions across 12 packages, including a full-stack acceptance suite.
 - **Written but not yet run against real Google Cloud.** Cloud KMS for the signing keys, tested against a fake KMS.
 - **Known limits.** These are listed in the [threat model](THREAT_MODEL.md). The main ones: no login on the control plane, taint tracked per session rather than per value, and the broker itself is trusted.
 
 ## Try it
 
-You need Docker. A Gemini API key is optional.
+You need Docker, plus `make`, `curl` and `python3`. A Gemini API key is optional.
 
 ```sh
 git clone https://github.com/Bikramshit/pact.git && cd pact

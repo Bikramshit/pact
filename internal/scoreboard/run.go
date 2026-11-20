@@ -23,8 +23,9 @@ type Summary struct {
 	HoldsAutoRejected   int     `json:"holds_auto_rejected"`
 	MedianOverheadMS    float64 `json:"median_overhead_ms"`
 	Errors              int     `json:"errors"`
-	// Excluded counts runs left out of the figures above because the reviewing
-	// model was unavailable: an outage is not a verdict.
+	// Excluded counts runs left out of the figures above because something
+	// failed (the reviewing model, the agent, a timeout, the oracle) and no
+	// effect was observed: an outage is not a verdict either way.
 	Excluded int `json:"excluded"`
 }
 
@@ -80,10 +81,56 @@ type job struct {
 	scenario, variant string
 }
 
+// ErrBusy means a scoreboard, replay or Break it run owns the demo world (the
+// repository, the targets and the agent) and is measuring it.
+var ErrBusy = errors.New("a scoreboard, replay or Break it run is in progress; try again when it finishes")
+
+// Exclusive runs fn unless a run owns the world. Resets and dashboard tasks go
+// through it, so they cannot change what a run is measuring.
+func (r *Runner) Exclusive(fn func() error) error {
+	if !r.busy.TryLock() {
+		return ErrBusy
+	}
+	defer r.busy.Unlock()
+	return fn()
+}
+
+// Batch runs scenarios one after another as a single exclusive run, then
+// resets the world.
+func (r *Runner) Batch(ctx context.Context, opts []Options) ([]Result, []error, error) {
+	if !r.busy.TryLock() {
+		return nil, nil, ErrBusy
+	}
+	defer r.busy.Unlock()
+	results, errs := make([]Result, len(opts)), make([]error, len(opts))
+	for i, o := range opts {
+		results[i], errs[i] = r.runScenario(ctx, o)
+	}
+	_ = r.Reset(ctx, nil)
+	return results, errs, nil
+}
+
+// claim takes the world for a background run. It refuses while a task started
+// from the dashboard is still queued or running, since the run's first reset
+// would change the repository under it.
+func (r *Runner) claim() error {
+	if !r.busy.TryLock() {
+		return errors.New("a run is already in progress")
+	}
+	recent := time.Now().UTC().Add(-10 * time.Minute).Format(time.RFC3339)
+	for _, as := range r.Broker.Agents.Assignments() {
+		if (as.Status == "queued" || as.Status == "running") && as.CreatedAt > recent {
+			r.busy.Unlock()
+			return errors.New("a task started from Run a task is still running; wait for it to finish")
+		}
+	}
+	return nil
+}
+
 // Start launches a scoreboard pass in the background and returns its initial state.
 func (r *Runner) Start(opts RunOptions) (Run, error) {
-	if !r.busy.TryLock() {
-		return Run{}, errors.New("a run is already in progress")
+	if err := r.claim(); err != nil {
+		return Run{}, err
 	}
 	if opts.AgentKind == "" {
 		opts.AgentKind = "replay"
@@ -116,6 +163,7 @@ func (r *Runner) Start(opts RunOptions) (Run, error) {
 	r.current = run
 	r.mu.Unlock()
 	usageBefore := r.Exec.ModelUsage()
+	initial := *run // copied before the goroutine starts changing run
 
 	go func() {
 		defer r.busy.Unlock()
@@ -150,7 +198,7 @@ func (r *Runner) Start(opts RunOptions) (Run, error) {
 		}
 		r.Hub.Publish("scoreboard", map[string]any{"run_id": snap.ID, "done": snap.Done, "total": snap.Total, "status": "done"})
 	}()
-	return *run, nil
+	return initial, nil
 }
 
 // Latest returns the run in progress, or else the most recent finished one.
@@ -177,7 +225,9 @@ func Summarize(results []Result) map[string]Summary {
 	for _, res := range results {
 		s := out[res.Mode]
 		s.Mode = res.Mode
-		if res.ReviewerErrors > 0 {
+		// A run that failed without any observed effect says nothing about the
+		// protection; one where an effect landed still counts as landed.
+		if res.ReviewerErrors > 0 || (res.Error != "" && len(res.Unauthorized) == 0) {
 			s.Errors++
 			s.Excluded++
 			out[res.Mode] = s
@@ -245,8 +295,8 @@ const ReadmePath = "deps/payments-sdk/README.md"
 
 // StartRedteam runs one custom injection without and with PACT in the background.
 func (r *Runner) StartRedteam(opts RedteamOptions) (Run, error) {
-	if !r.busy.TryLock() {
-		return Run{}, errors.New("a run is already in progress")
+	if err := r.claim(); err != nil {
+		return Run{}, err
 	}
 	if opts.AgentKind == "" {
 		opts.AgentKind = "live"
@@ -268,6 +318,7 @@ func (r *Runner) StartRedteam(opts RedteamOptions) (Run, error) {
 	r.redteam = run
 	r.mu.Unlock()
 	usageBefore := r.Exec.ModelUsage()
+	initial := *run // copied before the goroutine starts changing run
 
 	go func() {
 		defer r.busy.Unlock()
@@ -290,7 +341,7 @@ func (r *Runner) StartRedteam(opts RedteamOptions) (Run, error) {
 		r.mu.Unlock()
 		r.Hub.Publish("redteam", map[string]any{"run_id": run.ID, "done": run.Done, "total": run.Total, "status": "done"})
 	}()
-	return *run, nil
+	return initial, nil
 }
 
 // LatestRedteam returns the most recent red-team run of this process.

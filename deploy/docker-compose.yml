@@ -63,8 +63,13 @@ services:
       PACT_POLICY_ENGINE: ${PACT_POLICY_ENGINE:-opa}
       PACT_HOLD_TIMEOUT: ${PACT_HOLD_TIMEOUT:-120s}
       PACT_DB_URL: postgres://pact:${POSTGRES_PASSWORD:-pact-dev}@postgres:5432/pact
+      PACT_CONTROL_ADDR: ":8080"
+      PACT_BROKER_ADDR: ":9090"
       PACT_BROKER_ALLOW_CIDRS: 172.31.10.0/24
       PACT_CONTROL_DENY_CIDRS: 172.31.10.0/24,172.31.20.0/24,172.31.30.0/24
+      PACT_USER_KEYS: ${PACT_USER_KEYS:-on}   # judges may add their own Gemini key
+      PACT_USER_KEY_IDLE: ${PACT_USER_KEY_IDLE:-2h}
+      PACT_ALLOWED_HOSTS: ${PACT_ALLOWED_HOSTS:-}  # host names besides localhost, IPs, *.sslip.io and *.nip.io
       PACT_EGRESS_PIN: sink:8000              # every http_request lands on the sink
       TARGET_TOKEN: ${TARGET_TOKEN:-dev-target-token}
       RUNNER_TOKEN: ${RUNNER_TOKEN:-dev-runner-token}

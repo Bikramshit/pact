@@ -117,7 +117,14 @@ func New(t testing.TB, opts Options) *Stack {
 	if err != nil {
 		t.Fatal(err)
 	}
-	ev := evidence.New(st, ks.Evidence)
+	// Not t.TempDir: background runs a test starts may still append (and move
+	// the checkpoint) while the test is being cleaned up.
+	cpDir, err := os.MkdirTemp("", "pact-evidence-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(cpDir) })
+	ev := evidence.New(st, ks.Evidence).WithCheckpoint(filepath.Join(cpDir, "checkpoint.json"))
 	hub := events.NewHub()
 	cfg := executors.Config{
 		RunnerURL: runner.URL, RunnerToken: "test-runner-token",

@@ -1,6 +1,6 @@
 # Deploy to Google Cloud
 
-Run the whole stack on one Compute Engine VM, behind HTTPS and a password, so judges can open the dashboard from a link instead of a laptop.
+Run the whole stack on one Compute Engine VM, behind HTTPS and (unless you choose otherwise) a password, so judges can open the dashboard from a link instead of a laptop.
 
 ## Why one VM
 
@@ -11,7 +11,7 @@ internet --443--> Caddy (HTTPS, password) --> 127.0.0.1:8080  pact-core: control
                                                      :9090  broker, on agent_net only, published nowhere
 ```
 
-The control plane has no login of its own. Anyone who reaches it can sign contracts, approve held actions, reset the demo and spend Gemini quota, so it is only ever exposed through Caddy's password.
+The control plane has no login of its own. Anyone who reaches it can sign contracts, approve held actions, reset the demo and spend Gemini quota, so by default it is only exposed through Caddy's password. `PACT_PUBLIC=1` (below) removes the password; use it only for a short demo.
 
 | Created | Purpose |
 | --- | --- |
@@ -71,6 +71,8 @@ The first run adds you to the `docker` group and stops. The group applies only t
 3. Builds and starts the stack. The first build takes about 10 minutes.
 4. Checks that pact-core is healthy, that the HTTPS URL answers with the password, and that it refuses requests without one (401).
 
+If you serve your own domain (`PACT_HOST=demo.example.com`), `up.sh` also adds it to `PACT_ALLOWED_HOSTS` in `.env`. pact-core answers only to host names it knows, which protects a laptop install from DNS rebinding; `*.sslip.io` names are known already.
+
 ## 4. Check it
 
 On the VM:
@@ -95,7 +97,7 @@ curl -m 5 http://YOUR_VM_IP:8080/healthz
 | Stop the VM when not in use | `gcloud compute instances stop pact-demo --zone=us-central1-a` |
 | Start it again | `gcloud compute instances start pact-demo --zone=us-central1-a` |
 | Pick up new code (on the VM) | `cd pact && git pull && make build && make up` |
-| Change the password (on the VM) | `sh deploy/gcp/up.sh` |
+| Change the password (on the VM) | `sh deploy/gcp/up.sh` (it starts the stack without the KMS overlay; run `make up-kms` afterwards if you use KMS) |
 | Tamper and restore the chain (on the VM) | `make tamper`, `make untamper` |
 | Logs (on the VM) | `make logs`, `sudo journalctl -u caddy -n 50` |
 
@@ -125,10 +127,12 @@ gcloud compute firewall-rules delete pact-allow-web
 ## Security notes
 
 - **Only 80 and 443 are open.** Port 80 only redirects to HTTPS and answers the certificate challenge. Compose binds 8080 to the VM's loopback, and 9090 is published nowhere.
-- **Every request needs the password**, including the API and the live event stream. Share it with judges only. It is one shared password, not a per-person login.
+- **Every request needs the password**, including the API and the live event stream. Share it with judges only. It is one shared password, not a per-person login. With `PACT_PUBLIC=1` there is none, and anyone who finds the URL can do everything a judge can.
+- **Judges can add their own Gemini key** from the dashboard if the server's key stops working. It is held encrypted in pact-core's memory only, for that browser only (a `__Host-` cookie over HTTPS), and deleted after 2 hours unused. Set `PACT_USER_KEYS=off` in `.env` to turn this off.
+- **Scripts that change state must send `X-PACT-Client`**, for example `curl -H 'X-PACT-Client: cli' -X POST …`. The control plane refuses other state-changing requests, so another website cannot act through a judge's signed-in browser.
 - **The VM has no service account.** pact-core and the sink sit on `egress_net` and can reach the Compute Engine metadata server. With no service account there are no Google credentials for them to find. The agent and runner networks are internal and cannot reach it at all.
 - **Secrets stay on the VM.** `.env` is mode 600 and never leaves the VM. The Gemini key is not put in instance metadata, which every container on `egress_net` could read.
-- **The trust assumption is the same as on a laptop.** Whoever controls the VM controls pact-core and its local signing keys ([Threat model](THREAT_MODEL.md)). To move the org and issuer keys into Cloud KMS, follow the README's Cloud KMS section, and give the VM a dedicated service account that has only `roles/cloudkms.signerVerifier` on the `pact` keyring.
+- **The trust assumption is the same as on a laptop.** Whoever controls the VM controls pact-core and its local signing keys ([Threat model](THREAT_MODEL.md)). To move the org and issuer keys into Cloud KMS, follow the README's Cloud KMS section: its service-account key file is mounted into pact-core only, by `make up-kms`. Do not attach a service account to the VM instead; the metadata server would then hand its credentials to everything on `egress_net`, including the sink.
 
 ## Troubleshooting
 

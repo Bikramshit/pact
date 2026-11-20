@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"sort"
 	"strings"
 )
@@ -31,8 +32,8 @@ func Canonicalize(raw []byte) ([]byte, error) {
 	if err := dec.Decode(&v); err != nil {
 		return nil, err
 	}
-	if dec.More() {
-		return nil, errors.New("canon: trailing data after JSON value")
+	if err := atEnd(dec); err != nil {
+		return nil, err
 	}
 	var buf bytes.Buffer
 	if err := write(&buf, v); err != nil {
@@ -49,7 +50,19 @@ func Parse(raw []byte) (map[string]any, error) {
 	if err := dec.Decode(&m); err != nil {
 		return nil, err
 	}
+	if err := atEnd(dec); err != nil {
+		return nil, err
+	}
 	return m, nil
+}
+
+// atEnd fails unless only whitespace follows the decoded value. (dec.More
+// alone misses a stray closing bracket.)
+func atEnd(dec *json.Decoder) error {
+	if _, err := dec.Token(); err != io.EOF {
+		return errors.New("canon: trailing data after JSON value")
+	}
+	return nil
 }
 
 func write(buf *bytes.Buffer, v any) error {
