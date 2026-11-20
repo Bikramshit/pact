@@ -110,6 +110,17 @@ PACT_KMS_ISSUER_KEY=projects/your-project-id/locations/global/keyRings/pact/cryp
 
 `gcp-credentials.json` is in `.gitignore`. Contracts signed before the switch were signed by the old local org key and no longer verify; the evidence chain is unaffected.
 
+## Deploy to Google Cloud
+
+To give judges a link instead of a laptop, one Compute Engine VM runs the same compose stack, so the network layout and `make bypass-test` are unchanged. Caddy in front adds HTTPS and a password; the control plane has no login of its own, so it is never exposed without one.
+
+```sh
+sh deploy/gcp/create-vm.sh   # in Google Cloud Shell: VM, static IP, firewall for 80 and 443 only
+sh deploy/gcp/up.sh          # on the VM: random tokens, Caddy with a password, then the stack
+```
+
+Step by step, with costs and teardown: [docs/DEPLOY_GCP.md](docs/DEPLOY_GCP.md).
+
 ## Commands
 
 | Command | What it does |

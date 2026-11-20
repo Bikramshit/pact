@@ -12,5 +12,6 @@ Start with the overview; each page links to the next.
 | [Code map](CODE_MAP.md) | Where everything lives, what to read first, the tests |
 | [API reference](API.md) | Every endpoint on the control plane and the broker |
 | [Demo script](DEMO_SCRIPT.md) | The 4-minute stage demo, fallbacks, and judge Q&A |
+| [Deploy to Google Cloud](DEPLOY_GCP.md) | One VM behind HTTPS and a password, so judges can open the dashboard from a link |
 
 The same pages are built into the dashboard under **Docs**.

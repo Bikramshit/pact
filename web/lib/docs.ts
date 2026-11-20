@@ -21,6 +21,7 @@ export const DOCS: DocMeta[] = [
   { slug: "code-map", file: "CODE_MAP.md", title: "Code map", blurb: "Where everything lives, what to read first, and the tests.", group: "Understand" },
   { slug: "api", file: "API.md", title: "API reference", blurb: "Every endpoint on the control plane and the broker.", group: "Operate" },
   { slug: "demo-script", file: "DEMO_SCRIPT.md", title: "Demo script", blurb: "The 4-minute stage demo, fallbacks, and judge Q&A.", group: "Operate" },
+  { slug: "deploy-gcp", file: "DEPLOY_GCP.md", title: "Deploy to Google Cloud", blurb: "One VM behind HTTPS and a password, so judges can open the dashboard from a link.", group: "Operate" },
 ];
 
 const byFile = new Map(DOCS.map((d) => [d.file, d]));
