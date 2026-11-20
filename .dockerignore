@@ -6,4 +6,5 @@ web/out
 **/__pycache__
 *.md
 !demo/**/*.md
+!docs/*.md
 gcp-credentials.json

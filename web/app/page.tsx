@@ -1,6 +1,6 @@
 "use client";
 
-import { ArrowRight, Bot, CircleCheck, ChartColumn, CirclePause, FileSignature, Fingerprint, KeyRound, Link2, ListChecks, Play, Scale, ScrollText, ShieldAlert, ShieldX, Signature, Target, Workflow, type LucideIcon } from "lucide-react";
+import { ArrowRight, BookOpen, Bot, CircleCheck, ChartColumn, CirclePause, FileSignature, Fingerprint, KeyRound, Link2, ListChecks, Play, Scale, ScrollText, ShieldAlert, ShieldX, Signature, Target, Workflow, type LucideIcon } from "lucide-react";
 import Link from "next/link";
 import { useRef } from "react";
 import { Feed } from "@/components/Feed";
@@ -100,6 +100,9 @@ export default function OverviewPage() {
             <div className="mt-7 flex flex-wrap gap-2">
               <Link href="/run/" className="btn btn-primary btn-lg">
                 <Play className="size-4" /> Run the demo
+              </Link>
+              <Link href="/docs/" className="btn btn-lg">
+                <BookOpen className="size-4" /> Read the docs
               </Link>
               <a href="#pipeline" className="btn btn-lg btn-ghost">
                 How it decides <ArrowRight className="size-4" />

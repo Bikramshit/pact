@@ -1,6 +1,6 @@
 "use client";
 
-import { Bot, Bug, ChartColumn, Database, KeyRound, LayoutDashboard, Link2, Menu, Play, Radio, Scale, ShieldCheck, ShieldOff, Sparkles, TriangleAlert, X, type LucideIcon } from "lucide-react";
+import { BookOpen, Bot, Bug, ChartColumn, Database, ExternalLink, FolderGit2, KeyRound, LayoutDashboard, Link2, Menu, Play, Radio, Scale, ShieldCheck, ShieldOff, Sparkles, TriangleAlert, X, type LucideIcon } from "lucide-react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useEffect, useState } from "react";
@@ -16,7 +16,10 @@ const NAV: { href: string; label: string; icon: LucideIcon }[] = [
   { href: "/evidence/", label: "Evidence", icon: Link2 },
   { href: "/scoreboard/", label: "Scoreboard", icon: ChartColumn },
   { href: "/redteam/", label: "Break it", icon: Bug },
+  { href: "/docs/", label: "Docs", icon: BookOpen },
 ];
+
+const REPO = "https://github.com/Bikramshit/pact";
 
 function Logo() {
   return (
@@ -75,6 +78,16 @@ function Sidebar({ onNavigate }: { onNavigate?: () => void }) {
             {href === "/run/" && pending > 0 && <span className="ml-auto rounded-full bg-warn px-1.5 text-[11px] font-bold text-black">{pending}</span>}
           </Link>
         ))}
+        <a
+          href={REPO}
+          target="_blank"
+          rel="noopener noreferrer"
+          className="group mt-1 flex items-center gap-2.5 rounded-lg px-2.5 py-2 text-[13.5px] font-medium text-ink-2 transition-colors hover:bg-subtle hover:text-ink"
+        >
+          <FolderGit2 className="size-4 text-muted group-hover:text-ink-2" />
+          Source code
+          <ExternalLink className="ml-auto size-3.5 text-muted" />
+        </a>
       </nav>
 
       <div className="mt-auto space-y-4">

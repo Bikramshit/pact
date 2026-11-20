@@ -9,6 +9,8 @@ COPY package.json pnpm-workspace.yaml pnpm-lock.yaml* ./
 COPY web/package.json web/
 RUN pnpm install --frozen-lockfile || pnpm install
 COPY web web
+# The Docs pages in the dashboard are rendered from the same Markdown files as docs/ on GitHub.
+COPY docs docs
 RUN pnpm --filter web build
 
 # --- Go binaries ---
