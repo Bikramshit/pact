@@ -1,0 +1,129 @@
+# PACT MVP 0.1. Run from the repository root (the root compose.yaml includes this
+# file with the root as project directory, so paths below are relative to it).
+#
+# The trust boundary is the network layout, not the agent's code:
+#   agent_net    agent  <-> pact-core:9090          nothing else
+#   backend_net  pact-core <-> deploy, secrets, iam, postgres
+#   runner_net   pact-core <-> test runner          (runs agent-written code)
+#   egress_net   pact-core <-> Gemini API, attacker sink
+# Only pact-core joins all four.
+name: pact
+
+networks:
+  agent_net:
+    internal: true
+    ipam: { config: [{ subnet: 172.31.10.0/24 }] }
+  backend_net:
+    internal: true
+    ipam: { config: [{ subnet: 172.31.20.0/24 }] }
+  runner_net:
+    internal: true
+    ipam: { config: [{ subnet: 172.31.30.0/24 }] }
+  egress_net:
+    ipam: { config: [{ subnet: 172.31.40.0/24 }] }
+
+x-hardened: &hardened
+  read_only: true
+  tmpfs: [/tmp]
+  cap_drop: [ALL]
+  security_opt: ["no-new-privileges:true"]
+
+x-mock: &mock
+  build: { context: ., target: mock }
+  <<: *hardened
+  restart: unless-stopped
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: pact
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-pact-dev}
+      POSTGRES_DB: pact
+    networks: [backend_net]
+    volumes: [pgdata:/var/lib/postgresql/data]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U pact -d pact"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+    restart: unless-stopped
+
+  pact-core:
+    build: { context: ., target: pact-core }
+    ports: ["127.0.0.1:8080:8080"]          # control plane, host only; 9090 is published nowhere
+    networks: [agent_net, backend_net, runner_net, egress_net]
+    environment:
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}     # only pact-core holds it
+      GEMINI_MODEL: ${GEMINI_MODEL:-gemini-3.8-flash}
+      GEMINI_FALLBACK_MODELS: ${GEMINI_FALLBACK_MODELS-gemini-3.7-flash,gemini-3.6-flash,gemini-3.5-flash-lite}
+      GEMINI_BASE_URL: ${GEMINI_BASE_URL:-}
+      PACT_MODE: ${PACT_MODE:-on}
+      PACT_SCOREBOARD: "1"                    # lets the scoreboard start PACT-off sessions
+      PACT_POLICY_ENGINE: ${PACT_POLICY_ENGINE:-opa}
+      PACT_HOLD_TIMEOUT: ${PACT_HOLD_TIMEOUT:-120s}
+      PACT_DB_URL: postgres://pact:${POSTGRES_PASSWORD:-pact-dev}@postgres:5432/pact
+      PACT_BROKER_ALLOW_CIDRS: 172.31.10.0/24
+      PACT_CONTROL_DENY_CIDRS: 172.31.10.0/24,172.31.20.0/24,172.31.30.0/24
+      PACT_EGRESS_PIN: sink:8000              # every http_request lands on the sink
+      TARGET_TOKEN: ${TARGET_TOKEN:-dev-target-token}
+      RUNNER_TOKEN: ${RUNNER_TOKEN:-dev-runner-token}
+    volumes: [workspace:/workspace, evidence:/data]
+    <<: *hardened                            # writes only to its two volumes
+    depends_on:
+      postgres: { condition: service_healthy }
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8080/healthz"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+
+  agent:
+    build: ./agent
+    networks: [agent_net]                     # nothing else
+    environment:
+      PACT_BROKER: http://pact-core:9090
+      GEMINI_MODEL: ${GEMINI_MODEL:-gemini-3.8-flash}
+    <<: *hardened
+    user: "10001"
+    depends_on:
+      pact-core: { condition: service_healthy }
+    restart: unless-stopped
+
+  runner:
+    build: ./targets/runner
+    networks: [runner_net]
+    environment:
+      RUNNER_TOKEN: ${RUNNER_TOKEN:-dev-runner-token}
+    volumes: [workspace:/workspace:ro]
+    <<: *hardened
+    user: "10002"
+    pids_limit: 128
+    mem_limit: 256m
+    restart: unless-stopped
+
+  deploy:
+    <<: *mock
+    networks: [backend_net]
+    environment: { ROLE: deploy, TARGET_TOKEN: "${TARGET_TOKEN:-dev-target-token}" }
+
+  secrets:
+    <<: *mock
+    networks: [backend_net]
+    environment: { ROLE: secrets, TARGET_TOKEN: "${TARGET_TOKEN:-dev-target-token}" }
+
+  iam:
+    <<: *mock
+    networks: [backend_net]
+    environment: { ROLE: iam, TARGET_TOKEN: "${TARGET_TOKEN:-dev-target-token}" }
+
+  sink:
+    <<: *mock
+    networks: [egress_net]                    # plays "the internet"; the agent never joins this network
+    environment: { ROLE: sink, TARGET_TOKEN: "${TARGET_TOKEN:-dev-target-token}" }
+
+volumes:
+  workspace: {}
+  evidence: {}
+  pgdata: {}

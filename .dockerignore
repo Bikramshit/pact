@@ -1,0 +1,9 @@
+.git
+.env
+**/node_modules
+web/.next
+web/out
+**/__pycache__
+*.md
+!demo/**/*.md
+gcp-credentials.json

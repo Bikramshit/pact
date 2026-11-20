@@ -1,0 +1,17 @@
+# Hold the org key (contracts) and issuer key (capabilities) in Google Cloud KMS.
+# The private keys never leave Google's service; pact-core asks KMS to sign.
+#
+#   make up-kms
+#
+# Needs in .env:
+#   PACT_KMS_ORG_KEY=projects/P/locations/global/keyRings/pact/cryptoKeys/pact-org/cryptoKeyVersions/1
+#   PACT_KMS_ISSUER_KEY=projects/P/locations/global/keyRings/pact/cryptoKeys/pact-issuer/cryptoKeyVersions/1
+# and a service-account key file at ./gcp-credentials.json (or GCP_CREDENTIALS_FILE).
+services:
+  pact-core:
+    environment:
+      PACT_KMS_ORG_KEY: ${PACT_KMS_ORG_KEY:?set PACT_KMS_ORG_KEY in .env}
+      PACT_KMS_ISSUER_KEY: ${PACT_KMS_ISSUER_KEY:?set PACT_KMS_ISSUER_KEY in .env}
+      GOOGLE_APPLICATION_CREDENTIALS: /run/gcp/credentials.json
+    volumes:
+      - ${GCP_CREDENTIALS_FILE:-./gcp-credentials.json}:/run/gcp/credentials.json:ro

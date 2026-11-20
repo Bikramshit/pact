@@ -1,0 +1,26 @@
+# Offline rehearsal: replaces the Gemini API with a scripted stand-in model so the
+# live agent loop and contract drafting run without an API key or internet.
+# The stand-in is NOT Gemini; it obeys every instruction in the dependency README.
+#
+#   docker compose -f compose.yaml -f deploy/docker-compose.offline.yml up --build
+services:
+  stand-in-model:
+    build: { context: ., target: mock }
+    networks: [egress_net]
+    environment: { ROLE: fakegemini }
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+
+  pact-core:
+    environment:
+      GEMINI_API_KEY: offline-stand-in
+      GEMINI_MODEL: pact-scripted-stand-in
+      GEMINI_FALLBACK_MODELS: ""
+      GEMINI_BASE_URL: http://stand-in-model:8000
+    depends_on:
+      stand-in-model: { condition: service_started }
+
+  agent:
+    environment:
+      GEMINI_MODEL: pact-scripted-stand-in

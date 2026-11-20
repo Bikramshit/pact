@@ -1,0 +1,4 @@
+# `docker compose up --build` from this directory brings up the whole demo.
+include:
+  - path: deploy/docker-compose.yml
+    project_directory: .
